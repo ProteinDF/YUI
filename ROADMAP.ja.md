@@ -164,7 +164,7 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 
 ### フェーズ6k — Python プラグイン
 `architecture.ja.md` 6.4節に設計した: プロジェクトの外の開発者が Python で機能を足す。ネイティブ版のアプリに組み込んだ CPython で動かす（`PyO3`、Cargo の feature `python`。ブラウザー版には当面プラグインはない）。未着手。
-- **フェーズ6k-i — 組み込みの Python の基盤。** `frontend` の feature `python`、UI スレッドとチャネルでつながる Python のスレッド、メニューと同じ関数での変更の実行（8.4節）、最小限の公開 API（`yui.plugin`）。フェーズ6h-i（Python コンソール）と共有する。この段階の前に、インストーラーでの `libpython` の扱いを決める。
+- **フェーズ6k-i — 組み込みの Python の基盤。** `frontend` の feature `python`、UI スレッドとチャネルでつながる Python のスレッド、メニューと同じ関数での変更の実行（8.4節）、最小限の公開 API（`yui.plugin`）。フェーズ6h-i（Python コンソール）と共有する。インストーラーは、当面 `python` の feature なしで作る（6.4節）。Python の初期化に失敗しても、プラグインが無効になるだけにする。インストーラーへの CPython の同梱は、プラグインをインストーラーの利用者に届ける段で行う。
 - **フェーズ6k-ii — プラグインの読み込み。** `plugin.yaml` と `register(app)` を置く `<config>/yui/plugins/<name>/`、`api_version` の確認、`settings.yaml` の `plugins.enabled`（有効にするまで動かさない）、失敗のステータスバーと Log Viewer への表示。この段階の前に、`pip` / entry points にも対応するかを決める。
 - **フェーズ6k-iii — メニューとコマンド。** 8.7節の受け口を使う `add_command`（識別子は `plugin.<name>.` の下）と `add_menu_item`。右クリックの対象をコマンドに渡す。
 - **フェーズ6k-iv — プラグインの一覧と、プラグインを書く人のための文書。** アプリのプラグインの一覧（有効・無効、版、状態）、プラグインの書き方の手引き（英語と日本語）、公開 API の一覧、`api_version` の決まり、例のプラグイン。
