@@ -1,0 +1,26 @@
+[package]
+name = "yui-backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yui-core = { path = "../core" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower-http = { version = "0.7", features = ["cors", "fs"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2" # the daily log files
+notify = "8.2"
+yui-pty = { path = "../pty" }
+getrandom = "0.3" # the random secret of the Host role (OS CSPRNG)
+dirs = "6" # where backend.json goes
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tempfile = "3"

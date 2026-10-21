@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link data-trunk rel="icon" type="image/png" href="../packaging/icons/icon-64.png" />
+    <title>YUI - Molecular Modeling &amp; Visualization Platform</title>
+    <link data-trunk rel="rust" data-bin="yui-frontend" />
+    <!-- アプリ（GPL v3）と同梱フォント（SIL OFL 1.1）のライセンス文。配布の成果物に入れる -->
+    <link data-trunk rel="copy-file" href="assets/JetBrainsMono-OFL.txt" />
+    <link data-trunk rel="copy-file" href="assets/NotoSansJP-OFL.txt" />
+    <link data-trunk rel="copy-file" href="../LICENSE" />
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #121316;
+            color: #e0e0e0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* 起動・フォールバック用オーバーレイ */
+        #yui-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: #121316;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 99999;
+            transition: opacity 0.3s ease;
+        }
+        .yui-card {
+            background-color: #1e2025;
+            border: 1px solid #2d3139;
+            border-radius: 12px;
+            padding: 32px;
+            max-width: 520px;
+            width: 90%;
+            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+            text-align: center;
+        }
+        .yui-brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .yui-brand-badge {
+            background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            color: #ffffff;
+            font-weight: bold;
+            font-size: 14px;
+            padding: 4px 10px;
+            border-radius: 6px;
+        }
+        .yui-brand-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #f3f4f6;
+            margin: 0;
+        }
+        .yui-spinner {
+            width: 40px;
+            height: 40px;
+            margin: 20px auto;
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            border-top-color: #3b82f6;
+            animation: yui-spin 0.8s ease-in-out infinite;
+        }
+        @keyframes yui-spin {
+            to { transform: rotate(360deg); }
+        }
+        .yui-status-text {
+            color: #9ca3af;
+            font-size: 14px;
+            margin-top: 12px;
+            line-height: 1.5;
+        }
+
+        /* エラー表示スタイル */
+        .yui-error-badge {
+            display: inline-block;
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            font-size: 13px;
+            font-weight: 600;
+            padding: 4px 12px;
+            border-radius: 16px;
+            margin-bottom: 16px;
+        }
+        .yui-error-title {
+            color: #f9fafb;
+            font-size: 18px;
+            font-weight: 600;
+            margin: 0 0 12px 0;
+        }
+        .yui-error-desc {
+            color: #d1d5db;
+            font-size: 14px;
+            line-height: 1.6;
+            text-align: left;
+            margin-bottom: 16px;
+            background-color: #17181c;
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid #272a30;
+        }
+        .yui-error-desc ul {
+            margin: 8px 0 0 0;
+            padding-left: 20px;
+            color: #9ca3af;
+        }
+        .yui-error-desc li {
+            margin-bottom: 6px;
+        }
+        .yui-actions {
+            margin-top: 20px;
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+        }
+        .yui-btn {
+            background-color: #2563eb;
+            color: #ffffff;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .yui-btn:hover {
+            background-color: #1d4ed8;
+        }
+        .yui-btn-secondary {
+            background-color: #374151;
+            color: #e5e7eb;
+        }
+        .yui-btn-secondary:hover {
+            background-color: #4b5563;
+        }
+    </style>
+</head>
+<body>
+    <div id="yui-overlay">
+        <div class="yui-card">
+            <div class="yui-brand">
+                <span class="yui-brand-badge">YUI</span>
+                <h1 class="yui-brand-title">YUI Molecular Platform</h1>
+            </div>
+
+            <div id="yui-loading-view">
+                <div class="yui-spinner"></div>
+                <div class="yui-status-text" id="yui-status-text">WebAssembly &amp; WebGPU 初期化中...</div>
+            </div>
+
+            <div id="yui-error-view" style="display: none;">
+                <div class="yui-error-badge">動作要件エラー</div>
+                <div class="yui-error-title" id="yui-error-title">WebGPU 対応環境が必要です</div>
+                <div class="yui-error-desc" id="yui-error-desc"></div>
+                <div class="yui-actions">
+                    <button class="yui-btn" onclick="location.reload()">再読み込み</button>
+                    <button class="yui-btn yui-btn-secondary" onclick="window.open('https://github.com/gpuweb/gpuweb/wiki/Implementation-Status', '_blank')">WebGPU対応状況を確認</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            const overlay = document.getElementById('yui-overlay');
+            const loadingView = document.getElementById('yui-loading-view');
+            const errorView = document.getElementById('yui-error-view');
+            const errorTitle = document.getElementById('yui-error-title');
+            const errorDesc = document.getElementById('yui-error-desc');
+
+            let hasError = false;
+            let isLaunched = false;
+
+            // HTMLエスケープヘルパー（XSS対策: 指摘4）
+            function escapeHtml(str) {
+                if (!str) return '';
+                return String(str)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
+
+            // 対処方法リスト生成ヘルパー（重複マークアップの共通化: 指摘7）
+            function renderActions(items) {
+                return '<strong>対処方法:</strong><ul>' +
+                    items.map(function(item) { return '<li>' + item + '</li>'; }).join('') +
+                    '</ul>';
+            }
+
+            function showError(title, htmlMessage) {
+                hasError = true;
+                loadingView.style.display = 'none';
+                errorView.style.display = 'block';
+                errorTitle.textContent = title;
+                errorDesc.innerHTML = htmlMessage;
+                overlay.style.display = 'flex';
+                overlay.style.opacity = '1';
+            }
+
+            // 1. file:// プロトコル直接起動の検知
+            if (window.location.protocol === 'file:') {
+                showError(
+                    'ローカルファイル (file://) からは起動できません',
+                    'ブラウザのセキュリティ制限（CORS）により、WebAssemblyバイナリの読み込みが遮断されました。<br><br>' +
+                    renderActions([
+                        'ターミナルで <code>trunk serve --port 8085</code> を実行してください。',
+                        'ブラウザから <code>http://127.0.0.1:8085/</code> を開いてください。'
+                    ])
+                );
+                return;
+            }
+
+            // 2. WebGPU サポート事前検査 & GPU Device Lost 監視
+            if (!navigator.gpu) {
+                showError(
+                    'WebGPU に対応したブラウザが必要です',
+                    'お使いのブラウザまたは環境では WebGPU API が利用できません。<br><br>' +
+                    'YUI の 3D 分子レンダリングは WebGPU（Compute Shader・ジオメトリインスタンシング）に最適化されています。<br><br>' +
+                    renderActions([
+                        '最新版の <strong>Google Chrome</strong> / <strong>Microsoft Edge</strong> をご利用ください。',
+                        'ブラウザ設定で「<strong>ハードウェア アクセラレーションが使用可能な場合は使用する</strong>」を有効にしてください。',
+                        '<code>chrome://gpu</code> で「WebGPU: Hardware accelerated」になっていることを確認してください。'
+                    ])
+                );
+                return;
+            }
+
+            // GPU Device Lost 監視用フック
+            if (window.GPUAdapter && GPUAdapter.prototype.requestDevice) {
+                const origRequestDevice = GPUAdapter.prototype.requestDevice;
+                GPUAdapter.prototype.requestDevice = async function(...args) {
+                    const device = await origRequestDevice.apply(this, args);
+                    if (device && device.lost) {
+                        device.lost.then(function(info) {
+                            // 意図的な device.destroy() による切断は無視（指摘3）
+                            if (info && info.reason === 'destroyed') {
+                                return;
+                            }
+                            const reasonStr = escapeHtml(info ? info.message || info.reason : 'unknown');
+                            showError(
+                                'GPU デバイスとの接続が切断されました (Device Lost)',
+                                'WebGPU の描画デバイスが無効化されました。<br><br>' +
+                                '理由: <code>' + reasonStr + '</code><br><br>' +
+                                renderActions([
+                                    'ソフトウェアエミュレーション環境（SwiftShader等）では正常に描画できない場合があります。',
+                                    '実GPU（ハードウェアアクセラレーション）が有効なブラウザで再読み込みをお試しください。'
+                                ])
+                            );
+                        });
+                    }
+                    return device;
+                };
+            }
+
+            // アダプタ取得可能性の検査
+            navigator.gpu.requestAdapter().then(async function(adapter) {
+                if (!adapter) {
+                    showError(
+                        'WebGPU ハードウェアアダプタが見つかりません',
+                        'WebGPU API は利用可能ですが、適切な GPU アダプタを取得できませんでした。<br><br>' +
+                        renderActions([
+                            'GPU ドライバが最新であるかご確認ください。',
+                            'ブラウザのハードウェアアクセラレーション設定をご確認ください。',
+                            '仮想マシンやリモートデスクトップ、ソフトウェアレンダラ環境では動作しない場合があります。'
+                        ])
+                    );
+                    return;
+                }
+
+                // NOTE: プライバシー設定やフィンガープリンティング保護により adapter.info がマスクされる環境では
+                // 本チェックを通過しうるが、その場合でも下の device.lost 監視がバックストップとして機能する（指摘5）。
+                const info = (adapter.info) || (adapter.requestAdapterInfo ? await adapter.requestAdapterInfo().catch(() => ({})) : {});
+                const arch = (info && info.architecture) ? info.architecture.toLowerCase() : '';
+                const vendor = (info && info.vendor) ? info.vendor.toLowerCase() : '';
+
+                if (adapter.isFallbackAdapter || arch.includes('swiftshader') || vendor.includes('swiftshader')) {
+                    showError(
+                        'WebGPU ソフトウェアフォールバック環境が検出されました',
+                        'ハードウェア GPU ではなく、CPU ソフトウェアエミュレーション（SwiftShader）で動作しています。<br><br>' +
+                        'YUI の 3D レンダラは高度な WebGPU 機能を要求するため、ソフトウェアフォールバックでは描画パイプラインが停止します。<br><br>' +
+                        renderActions([
+                            '物理 GPU を搭載した実機環境でアクセスしてください。',
+                            'ブラウザ設定で「ハードウェア アクセラレーション」を有効にしてください。'
+                        ])
+                    );
+                }
+            }).catch(function(err) {
+                console.warn('[YUI] navigator.gpu.requestAdapter error:', err);
+            });
+
+            // NOTE: CanvasRenderingContext2d / panicked / unreachable / RuntimeError 等の部分一致は、
+            // iced_tiny_skia フォールバック時の 2D コンテキスト競合パニックを捕捉するための対症療法（指摘6）。
+            // 将来 iced/wgpu 側でヘッドレスフォールバックが安全にハンドリングされるまでの暫定ガード。
+            // 正常起動後の誤発火を防ぐため、'Invalid' 等の広すぎる文字列は除外している（指摘2）。
+            function isInitFailure(msg) {
+                return msg.includes('CanvasRenderingContext2d') ||
+                       msg.includes('panicked') ||
+                       msg.includes('unreachable') ||
+                       msg.includes('RuntimeError');
+            }
+
+            function handleInitError(rawMessage) {
+                // 起動成功後は無関係なエラーでの誤発火を防止（指摘2）
+                if (hasError || isLaunched) return;
+                const msg = String(rawMessage || '');
+                if (isInitFailure(msg)) {
+                    const safeMsg = escapeHtml(msg || 'Unknown error');
+                    showError(
+                        'アプリケーションの初期化に失敗しました',
+                        'グラフィックスの初期化中にエラーが発生しました。<br><br>' +
+                        '<code>' + safeMsg + '</code><br><br>' +
+                        renderActions([
+                            'ハードウェアアクセラレーション対応ブラウザ（Chrome / Edge 等）で再読み込みをお試しください。',
+                            '他の 3D/WebGPU アプリケーションが動作するかご確認ください。'
+                        ])
+                    );
+                }
+            }
+
+            // 3. グローバルエラー・パニック捕捉（起動前限定: 指摘2）
+            window.addEventListener('error', function(event) {
+                handleInitError(event.message || (event.error && event.error.message));
+            });
+
+            // 非同期 Promise 失敗捕捉（指摘1: unhandledrejection対応）
+            window.addEventListener('unhandledrejection', function(event) {
+                const reason = event.reason;
+                const msg = reason instanceof Error ? reason.message : String(reason || '');
+                handleInitError(msg);
+            });
+
+            // 4. Trunk 起動完了検知
+            window.addEventListener('TrunkApplicationStarted', function() {
+                if (hasError) return;
+                // キャンバスが生成され、描画が開始されるまでわずかに待機してオーバーレイを消す
+                setTimeout(function() {
+                    if (!hasError) {
+                        isLaunched = true; // 起動完了フラグをセット（指摘2）
+                        overlay.style.opacity = '0';
+                        setTimeout(function() {
+                            if (!hasError) overlay.style.display = 'none';
+                        }, 300);
+                    }
+                }, 150);
+            });
+        })();
+    </script>
+</body>
+</html>

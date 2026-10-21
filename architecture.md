@@ -1,0 +1,885 @@
+# YUI — System Architecture & Design Document (architecture.md)
+
+*[日本語版](architecture.ja.md)*
+
+This document defines the system architecture, module boundaries, data flow, and threading design for the integrated visualization platform "結 (YUI)". Development and AI-agent-driven code generation must strictly follow this design document.
+
+---
+
+## 1. High-Level Architecture
+
+"結 (YUI)" adopts a **data-oriented MVI (Model-View-Intent) architecture** to guarantee consistency and full reproducibility of state. `iced`'s Elm Architecture (Model-View-Update) corresponds directly to this design philosophy.
+
+```
+┌───────────────────────────────────┐
+│           Input Intents           │
+│  (Mouse/UI, Python, Voice via LLM) │
+└─────────────────┬─────────────────┘
+                   │ AppState Delta (iced::Message)
+                   ▼
+┌───────────────────────────────────┐
+│          YUI Core (Rust)          │
+│           [AppState]              │◄──── [ proteindf-bridge (external crate) ]
+└─────┬───────────────────────▲─────┘      Structure I/O & modeling delegate
+      │                       │
+┌─────┼───────────────────────┼───────────────────┬───────────────────┐
+▼     ▼                       ▼                   ▼                   ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+│  wgpu Renderer  │ │  File I/O (OS)  │ │ WebSocket        │ │   PyO3/Pyodide  │
+│ (Render/Compute)│ │ (YAML/MsgPack)  │ │ (→WebTransport)  │ │ (Python Engine) │
+└────────┬────────┘ └────────┬────────┘ └────────┬────────┘ └────────┬────────┘
+         │                   │                   │                   │
+         ▼                   ▼                   ▼                   ▼
+ [Screen / Headless]  [Local/Cluster Disk]  [Cluster/Other Users] [User Command / API]
+```
+
+### 1.1 Module Boundaries
+1. **`core` (Shared Library):**
+   - Handles platform-independent pure data structures (`AppState`) and serialization/deserialization (MessagePack, YAML).
+   - Reading/writing/transforming structural data itself, and force-field-independent structural manipulation, are not implemented in-house; they are delegated to the external crate `proteindf-bridge` (see Chapter 10 below).
+2. **`frontend` (Wasm / Native App — client side):**
+   - A VSCode-style user interface built with `iced` (Elm Architecture). The panel layout uses `iced::widget::pane_grid` for a resizable, draggable, splittable configuration.
+   - Supports both a desktop build and a WebAssembly (WASM) build (`wasm32-unknown-unknown`). Performs real-time 3D rendering and UI control in the browser via WebGL2/WebGPU.
+   - **WASM Build Pipeline & Trunk:** Built using [Trunk](https://trunkrs.dev/) with `frontend/index.html` as the web entrypoint. Cryptographic RNG uses `getrandom_backend="wasm_js"` configured in `.cargo/config.toml`. Panic reporting in browser DevTools is handled by `console_error_panic_hook`, and lifecycle events are logged via `web-sys` console.
+   - **Network Layer Isolation & WASM Transport (Phase 6c-i / 6c-ii):** Native networking crates (`tokio-tungstenite`, native `tokio` runtime) are isolated under `[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`. Under WASM compilation (`cfg(target_arch = "wasm32")`), network streams (WebSocket collab, log tailing, PTY terminal) are implemented using `gloo-net` WebSocket, bridged to `iced`'s `Send` stream requirements via `tokio::sync::mpsc` and `wasm_bindgen_futures::spawn_local`. REST API requests use target-independent `reqwest` backed by the browser `window.fetch` API.
+   - When running in the browser, connection targets can be configured via URL query parameters (`?collab=` or `?backend=`) or fall back automatically to the `/api/collab` of the server that served the page (`ws://{location.host}/api/collab`, `wss://` for an https page; `ws://127.0.0.1:8080/api/collab` only when the host is unknown, e.g. `file://`). Data is received on demand from the web server via HTTP fetch (REST API) or WebSocket delta-sync.
+3. **`backend` (HTTP / WebSocket Server — server side):**
+   - A Rust server that handles large PDB/XYZ file I/O, parallel trajectory decoding, and isosurface (Marching Cubes) computation on behalf of the client.
+   - Provides clients with a CORS-enabled REST API (JSON/MessagePack) and a low-latency delta-sync connection (see Sections 4.2 and 7).
+4. **`renderer-native` (Native CLI App):**
+   - Headless `wgpu`-based batch rendering with no display window. Handles high-resolution PNG/SVG (vector) export as well as publication-quality offline rendering (Section 4.7).
+5. **`core-py` (Python Bindings — native):**
+   - Exposes `core`'s data structures (`AppState`, `Selector`, `Representation`, `AtomGroup`) to Python using `PyO3` as a `cdylib`/`rlib`.
+   - To keep `core` purely platform-independent and fully compatible with WebAssembly (`wasm32-unknown-unknown`), the Python C-API dependency is strictly isolated in `core-py`. This provides the native scripting surface (`import yui`) and serves as the foundation for the AI chat tool-calling loop (§14.3) and QCLObot integration (Chapter 11).
+
+---
+
+## 2. Data Structures & State Management (Single Source of Truth)
+
+### 2.1 Three States of State Management
+The application state `AppState` can be losslessly converted between the following three formats.
+Collectively, these three interchangeable representations of one `AppState` — describing everything
+needed to reproduce what's on screen (camera, `SceneSettings`, structural data, representations,
+annotations, trajectory, laser pointer) — are referred to as a **"YUI Workspace Document."** Use this
+term when referring to the format as a whole, as distinct from `SceneSettings` (§2.3), which is only the
+scene-wide rendering sub-layer (background color etc.) within it.
+
+1. **Rust Struct (Memory):** Thread-safe (`Send + Sync`), composed of minimal data to avoid pointer copies.
+2. **MessagePack (Intermediate / Network / Disk):** A fast, lightweight binary format. Used for checkpoint saving and network transfer (delta sync).
+   - **Header design:** `[Magic: "YUI\0" (4B)] + [Version (1B)] + [Compression Flag (1B)] + [Payload]`
+   - Adopts an encoding convention compatible with `proteindf-bridge`'s native round-trip format (`.brd`, msgpack-based), ensuring interoperability with the ProteinDF/QCLObot ecosystem.
+   - **Serialization layout (Map format):** The MessagePack payload of `AppState` is serialized using named fields (`rmp_serde::to_vec_named`, Map format) rather than the default array/tuple format. This is because `proteindf_bridge::Interaction` omits `None` fields via `skip_serializing_if = "Option::is_none"`, which corrupts position-based element alignment in array format. Deserialization (`unpack_app_state`) transparently accepts both the new Map format and legacy Array format (such as files saved by 2026.10.0 where `interactions` is omitted, falling back to `InteractionSet::default()` via `#[serde(default)]`). Collab delta packets (`pack_collab_packet`) continue to use `rmp_serde::to_vec` (array format) without issue, as `AppStateDelta` does not include interactions.
+3. **YAML (Interchange / Human):** For user-facing export/import. Follows the existing relative-path resolution rules.
+
+### 2.2 Relationship Between the Structural Data Model and `proteindf-bridge`
+The molecular structure inside `AppState` is anchored by `core::atom_group::AtomGroup`, which is a transparent newtype wrapper (`Deref`/`DerefMut`) around `proteindf_bridge::AtomGroup`. Serialization and deserialization to/from MessagePack and YAML are implemented manually by delegating to `proteindf-bridge`'s dictionary interchange format (`get_raw_data()` / `from_dict_data(&rmpv::Value)`).
+
+In accordance with the protein schema convention, the hierarchical tree consists of 4 distinct levels:
+**`Model` → `Chain` → `Residue` → `Atom`** (e.g. `"/model_1/A/5/CA"`).
+Canonical traversal across these levels must always go through the depth helpers provided by `core::atom_group` (`iter_models`, `iter_chains`, `iter_residues`, `iter_atoms`, `iter_flat_atoms`, and `parse_residue_key`) rather than assuming hardcoded group depths.
+
+Secondary structure labels (Helix/Sheet/Loop) are tracked via `SecondaryStructureMap` (`HashMap<String, SecondaryStructureKind>`), an interim side-map keyed by residue path. This is a temporary measure until a dedicated secondary-structure field is added upstream to `proteindf_bridge::AtomGroup` (see `RUST_PORT_SPEC.md` §9).
+
+Bond topology and bond orders are resolved via `proteindf_bridge::AtomGroup::setup(&mut self)` (Phase 6e-vi), which respects file-derived connectivity (such as PDB CONECT records), applies canonical Chemical Component Dictionary (CCD) templates for exact bond orders (e.g. carbonyl C=O double bonds and aromatic rings), and supplements unbonded pairs with a covalent-radius neighbor heuristic. In `AppState`, `molecule: Molecule` serves as a one-way flattened rendering cache derived from `atom_group` via `sync_molecule_from_atom_group()`.
+
+Multi-model structures (such as NMR ensembles or trajectory frames represented across multiple models, e.g. `1HLS.cif` with 20 models) are filtered for display via `AppState.active_model: Option<String>`. Upon loading a structure (`load_structure_into_state`), if multiple models exist (`models.len() > 1`), the first model key (e.g. `"model_1"`) is automatically assigned to `active_model`; for structures with 1 or 0 models, it defaults to `None`. When `active_model` is `Some(key)`, the 3D viewport renders only atoms, bonds, ribbons, non-covalent interactions, and picking hits belonging to that model; when `None`, all models are rendered simultaneously. Crucially, the internal data formats of `Molecule` and `Atom` remain untouched — the flattened `Molecule` cache continues to contain all models. To avoid O(N) full-atom traversals on every render frame, atom-to-model ownership is precalculated once on structure changes via `core::atom_group::calculate_model_atom_ranges` as a compact list of contiguous ID ranges (`ModelAtomRange`), enabling O(models) binary-range lookups during active-atom collection. Because switching active models is a client-local visual preference, it is excluded from collaborative delta sync (`AppStateDelta`). However, when fetching the initial state (`AppState`) from the backend upon connection, `active_model` is received and applied alongside the structure data.
+
+MOL2 structures loaded via `proteindf_bridge::format::SimpleMol2` return a flat `AtomGroup` with atoms directly beneath the molecule node. To integrate with YUI's standard 4-tier hierarchy (`Model → Chain → Residue → Atom`), these flat groups are normalized as follows:
+- **Model:** Keyed as `"model_1"`.
+- **Chain:** Keyed as `"A"`.
+- **Residue:** Keyed as `"1"`. The residue name is derived from the first 3 characters of the MOL2 molecule name in uppercase (e.g. `"ETH"` for `"ethanol"`), or defaults to `"UNL"` (Unknown Ligand) if empty.
+- **Atom:** Preserves MOL2 atom IDs as keys (`"1"`, `"2"`, etc.) directly under the residue group.
+- **Bonds:** If an `@<TRIPOS>BOND` section is present in the file, explicit bond records are preserved within the residue group and take precedence without re-running `AtomGroup::setup()`. Only when explicit BOND records are absent is `AtomGroup::setup()` invoked to heuristically infer covalent bonds. Secondary structure is not computed (remains empty).
+
+
+### 2.3 `SceneSettings` — Global Scene Parameters
+Parameters that apply to the rendered 3D scene as a whole, rather than to any specific selection or
+`Representation` (§6.2), are collected into a dedicated `AppState.scene: SceneSettings` sub-structure —
+the same granularity as `CameraState`/`DataPaths`/`TrajectoryState` — rather than being scattered as
+loose top-level `AppState` fields. This keeps the whole thing naturally expressible in YAML/MessagePack
+(§2.1), consistent with the no-new-DSL policy (§6.2): a structured, serde-friendly Rust struct, not a
+parser. Currently holds only `background_color: Color4` (default matches `index.html`'s dark theme,
+`#121316`, defined once as `DEFAULT_BACKGROUND_COLOR`); fog, ambient light, and grid/axis display are
+expected future additions to this same struct. Round-trips through `AppStateDelta.scene: Option<SceneSettings>`
+using whole-substructure replacement, the same pattern as `camera: Option<CameraState>`. The field carries
+`#[serde(default)]` so a YAML/MessagePack payload predating this substructure still deserializes (falling
+back to `SceneSettings::default()`) instead of erroring on a missing key.
+
+### 2.4 YUI Workspace Document — Field Reference
+
+**Top-level fields of `AppState`** (`core/src/state.rs`):
+
+| Field | Type | Purpose |
+|---|---|---|
+| `version` | `u32` | State format version (`ATOM_GROUP_FORMAT_VERSION = 2`). Verified on import before deep deserialization (`core::packing::unpack_app_state` / `core::yaml::import_app_state_from_yaml[_str]`); non-matching versions produce a clear error indicating unsupported or legacy format. |
+| `camera` | `CameraState` | `eye`/`target`/`up`/`fov` — the camera pose of the **first** 3D viewport (§8.1). Dragging or scrolling in that viewport updates it, so it is saved with the workspace; changes arriving by collaboration delta or the backend's initial state are applied to the screen. The second viewport's camera is not part of `AppState`. |
+| `scene` | `SceneSettings` | Global scene-wide rendering parameters (§2.3). |
+| `atom_group` | `Option<AtomGroup>` | The structural SSOT (§2.2): a newtype wrapping `proteindf_bridge::AtomGroup` (`Model → Chain → Residue → Atom` tree). `None` for an empty/new workspace. |
+| `secondary_structure_map` | `SecondaryStructureMap` | Interim side-map (`HashMap<String, SecondaryStructureKind>`) tracking secondary structure labels by residue path (§2.2). |
+| `interactions` | `InteractionSet` | List of non-covalent interactions (hydrogen bonds, salt bridges, CH-π) and disulfide bonds detected via `proteindf_bridge::InteractionSet` (§10.2). Computed once on structure load; never recomputed by the renderer. Backwards-compatible via `#[serde(default)]`; excluded from `AppStateDelta`. |
+| `molecule` | `Molecule` | `{ atoms: Vec<Atom>, bonds: Vec<Bond> }` — a flattened, GPU-instancing-friendly cache derived one-way from `atom_group` via `sync_molecule_from_atom_group()`. Never edit this directly and expect it to flow back into `atom_group`. |
+| `representations` | `Vec<Representation>` | `{ id, selection: Selector, kind: RepresentationKind, color: ColorScheme, opacity, visible, interaction_kinds: Vec<InteractionKind>, hides_atoms: bool }` list (§6.2.2); later entries win where selections overlap (PyMOL-style). |
+| `named_selections` | `BTreeMap<String, Selector>` | Named selection groups (PyMOL-style `select groupname, ...`); reusable name-to-Selector mapping distinct from `Representation.id` (which is 1:1 with display style). |
+| `annotations` | `Vec<Annotation>` | 3D text/marker annotations (`id`, `text`, `position`, `color`, `visible`, optional `target_atom_id`). |
+| `cube_view` | `CubeView` | `{ dataset (0), isolevel (0 = the data set's default), opacity (0.6), positive_color, negative_color }` — which orbital (data set) of the CUBE is shown, at which isolevel, and how the isosurfaces look; per CUBE file and saved in the workspace (the file path is in `data_paths.cube_path`). YAML: `cube_view: { dataset: 1, isolevel: 0.3, opacity: 0.6, positive_color: 0, negative_color: 1 }`. Reset when another CUBE is opened or the CUBE is closed; used again when the workspace reopens the same file (a `dataset` beyond the file's last data set is clamped, a negative or non-finite `isolevel` becomes 0). The colors are indexes of the frontend's palette (`cube_view::COLOR_PRESETS`). Like the camera of §8.1 it is state, not a user setting. |
+| `data_paths` | `DataPaths` | `{ pdb_path, cube_path }` — optional external file references, resolved relative to the YAML file's own directory on import. |
+| `trajectory` | `TrajectoryState` | `{ file_path, total_frames, current_frame_index, play_speed_fps, is_playing }` — trajectory playback state. |
+| `laser_pointer` | `LaserPointer` | `{ active, position, user_id, color }` — live collaboration pointer, synced via `AppStateDelta`. |
+| `active_model` | `Option<String>` | Active model key for multi-model structures (e.g. NMR ensembles). `None` renders all models (or single-model default); `Some(model_key)` (e.g. `"model_1"`) filters atomic spheres, bonds, ribbons, picking, and interactions to that model. Backwards-compatible via `#[serde(default)]`; client-local display preference excluded from `AppStateDelta`. |
+
+**`AppStateDelta`** (used for collab delta-sync, §7.3) carries `Option<...>` of the same sub-structures
+(`camera`, `scene`, `representations`, `annotations`, `laser_pointer`, `named_selections`) — a present field means "replace
+this whole sub-structure," never a field-by-field merge within it.
+
+**The on-disk `state.yaml` file is not a bare YUI Workspace Document.** `frontend`'s File > Open/Save
+(§8.2) wraps one inside `SavedWorkspaceState { #[serde(flatten)] app_state: AppState, pane_views: PaneLayout }` (the layout is saved as the same `pane_views` map as before)
+(`frontend/src/pane_view.rs`), so the fields above appear at the YAML top level alongside a sibling
+`pane_views` key holding per-region tab layout (§8.2/8.3) — that key is UI chrome, not part of the
+Workspace Document's own data model. `import_workspace_from_yaml_str` falls back to parsing a bare
+`AppState` (no `pane_views`) for legacy files. By contrast, MessagePack channels that exchange a Workspace
+Document directly — the collab delta stream, `backend`'s `/api/state` REST endpoint, and `core-py`'s
+Python-facing pack/unpack — never include `pane_views`; that key is specific to the native/web frontend's
+own saved-file format.
+
+**YAML tag syntax for enum fields.** Unit variants (no payload) serialize as a bare lowercase
+`snake_case` string, e.g. `selection: all`, `color: element`. Variants carrying data are rendered with a
+leading `!variant_name` YAML tag rather than a `variant_name:`-keyed map — e.g. `ColorScheme::Uniform([1.0, 0.85, 0.1, 1.0])`
+serializes as:
+```yaml
+color: !uniform
+- 1.0
+- 0.85
+- 0.1
+- 1.0
+```
+and `Selector::ResidueRange { chain: Some("A".into()), start: 1, end: 10 }` as:
+```yaml
+selection: !residue_range
+  chain: A
+  start: 1
+  end: 10
+```
+Anyone hand-editing a Workspace Document's YAML needs to use this `!tag` form for any non-unit `Selector`/`ColorScheme`
+variant — a plain `variant_name: {...}` map is a different (and for these types, unsupported) shape.
+
+**Resolved limitation — `Selector::Not` YAML serialization.** Previously, `Selector::Not(Box<Selector>)` was
+a newtype variant wrapping another `Selector` value directly (not via a `Vec`), which caused `serde_yaml_ng` to
+error with `"serializing nested enums in YAML is not supported yet"`. This was resolved by changing `Selector::Not`
+from a newtype variant to a struct variant with a named field (`Not { inner: Box<Selector> }`), allowing it to
+round-trip losslessly through YAML as `!not { inner: ... }` at any nesting depth.
+
+**MessagePack serialization format — Map format with legacy Array compatibility.**
+When packing `AppState` into MessagePack (`pack_app_state` in `core/src/packing.rs`), data is written as a named Map (`rmp_serde::to_vec_named`) rather than an unnamed Array. This change was necessitated by `proteindf_bridge::Interaction`, which uses `#[serde(skip_serializing_if = "Option::is_none")]` on optional fields (`distance`, `angle`, `donor_acceptor_role`), causing array-format deserialization to misalign. `unpack_app_state` inspects the top-level container type in `peek_state_format_version` and cleanly deserializes both named Map payloads and legacy unnamed Array payloads (such as those written by 2026.10.0, where `interactions` is omitted and populates via `#[serde(default)]`). Collab delta synchronization (`pack_collab_packet`) continues to use `rmp_serde::to_vec` (Array format), as `AppStateDelta` does not contain `interactions` and benefits from compact delta serialization. To prevent silent state corruption from field misalignment when decoding legacy array-formatted payloads, any new fields added to `AppState` must always be placed at the end of the struct and annotated with `#[serde(default)]`.
+
+**Minimal example** (two-atom peptide fragment, one default representation, all other fields at their
+`Default::default()` values):
+```yaml
+version: 1
+camera:
+  eye:
+  - 0.0
+  - 0.0
+  - 100.0
+  target:
+  - 0.0
+  - 0.0
+  - 0.0
+  up:
+  - 0.0
+  - 1.0
+  - 0.0
+  fov: 45.0
+scene:
+  background_color:
+  - 0.0706
+  - 0.0745
+  - 0.0863
+  - 1.0
+atom_group:
+  name: mini
+  models:
+  - id: model_1
+    chains:
+    - id: A
+      residues:
+      - id: 1
+        name: GLY
+        insertion_code: null
+        secondary_structure: null
+        atoms:
+        - id: 1
+          name: N
+          element: N
+          position:
+          - 0.0
+          - 0.0
+          - 0.0
+          formal_charge: null
+          bfactor: null
+        - id: 2
+          name: CA
+          element: C
+          position:
+          - 1.5
+          - 0.0
+          - 0.0
+          formal_charge: null
+          bfactor: null
+molecule:
+  atoms:
+  - id: 1
+    element: N
+    position:
+    - 0.0
+    - 0.0
+    - 0.0
+    radius: 1.55
+    color:
+    - 0.2
+    - 0.2
+    - 0.9
+    - 1.0
+    residue_name: GLY
+    residue_index: 1
+    chain_id: A
+  - id: 2
+    element: C
+    position:
+    - 1.5
+    - 0.0
+    - 0.0
+    radius: 1.7
+    color:
+    - 0.5
+    - 0.5
+    - 0.5
+    - 1.0
+    residue_name: GLY
+    residue_index: 1
+    chain_id: A
+  bonds: []
+representations:
+- id: rep_1
+  selection: all
+  kind: ball_and_stick
+  color: element
+  opacity: 1.0
+  visible: true
+named_selections: {}
+annotations: []
+data_paths:
+  pdb_path: null
+  cube_path: null
+trajectory:
+  file_path: ''
+  total_frames: 0
+  current_frame_index: 0
+  play_speed_fps: 0
+  is_playing: false
+laser_pointer:
+  active: false
+  position:
+  - 0.0
+  - 0.0
+  - 0.0
+  user_id: ''
+  color:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+```
+(Generated with `export_app_state_to_yaml_str`; a `state.yaml` saved from the app would additionally carry
+a sibling `pane_views` key as described above.)
+
+---
+
+## 3. Modeling Features & Tool Integration
+
+"Modeling" is not fully implemented in-house; instead it is designed to integrate with external tools via a **pluggable `ModelingProvider` abstraction**. This minimizes installation effort while leaving room for future in-house extensions.
+
+### 3.1 The `ModelingProvider` Abstraction
+```rust
+trait ModelingProvider {
+    fn minimize(&self, ag: &AtomGroup, opts: &MinimizeOptions) -> Result<AtomGroup>;
+    fn add_hydrogens(&self, ag: &AtomGroup) -> Result<AtomGroup>;
+    // ...
+}
+```
+The backend implementation can be switched via a configuration file (YAML):
+
+1. **Local executable:** Configure an executable path and argument template (e.g. OpenBabel's `obminimize`).
+2. **HTTP API:** Configure an endpoint URL (e.g. a Dockerized OpenBabel/RDKit instance running locally or remotely).
+3. **In-house (delegated to `proteindf-bridge`):** Structural preprocessing equivalent to `proteindf-bridge`'s `Modeling`/`IonPair`/`SSBond`/`Neutralize` — hydrogen addition, ion-pair assignment, SSBond assignment, terminal capping (ACE/NME), etc. — is completed here. Full force-field optimization and docking are out of scope and delegated to options 1/2 above.
+
+Measures to reduce installation burden (bundling OS-specific prebuilt binaries, Docker container distribution, etc.) will be considered separately once the distribution strategy (Chapter 9) is finalized.
+
+---
+
+## 4. Rendering Pipeline (WebGPU)
+
+To comfortably render large-scale complexes even on low-spec PCs and mobile devices, the following technologies are adopted. **The target scale is up to roughly 1 million atoms** (a major increase from the existing 1AON, ~58,000 atoms).
+
+### 4.1 Geometry Instancing
+Master meshes for atoms (spheres) and sticks (cylinders) are kept in GPU memory; instance data is transferred in bulk via `wgpu::Buffer` and drawn in parallel in a single pass.
+
+### 4.2 GPU-Driven Rendering (Supporting 1 Million Atoms)
+Since plain instancing alone breaks down frame rates at the 1-million-atom scale, the following are added:
+- **Indirect Draw + Compute Culling:** Frustum and occlusion culling are performed in a Compute Shader, narrowing down the number of instances to draw on the GPU side ahead of time.
+  - *Frustum extraction:* Gribb-Hartmann plane extraction extracts 6 normalized clipping planes (Left, Right, Bottom, Top, Near, Far) directly from the `view_proj` matrix, adapted to wgpu's normalized device coordinate (NDC) depth range of `[0, 1]` (Near: $z' \ge 0$, Far: $z' \le w'$).
+  - *Bounding sphere culling & compaction:* In the WGSL compute shader (`cs_cull`), each instance matrix $M$ dynamically derives its bounding sphere center ($M_{3.\text{xyz}}$) and conservative radius ($\sqrt{\|M_{0.\text{xyz}}\|^2 + \|M_{1.\text{xyz}}\|^2 + \|M_{2.\text{xyz}}\|^2}$), working uniformly for both atom spheres and bond cylinders without false-negative clipping.
+  - *GPU compaction & Indirect Draw:* Instances surviving all 6 frustum planes are appended into a compacted instance vertex buffer via `atomicAdd(&indirect_args.instance_count, 1u)`. The resulting indirect argument buffer is directly passed to `wgpu::RenderPass::draw_indexed_indirect`, completing culling and rendering entirely on the GPU without CPU readback stalls.
+- **Spatial partitioning:** Introduces a Bounding Volume Hierarchy (BVH) over atomic coordinates to eliminate O(n²) brute-force processing.
+  - *Data structure selection:* A BVH with Axis-Aligned Bounding Boxes (AABB) constructed via longest-axis midpoint subdivision is selected over a regular Octree. Biomolecules exhibit non-uniform, anisotropic geometric distributions (e.g. elongated fibers, domain clefts) where regular Octree cubes suffer from empty leaf explosion and uneven depth, whereas an adaptive BVH tightly bounds sparse clusters. Furthermore, AABB hierarchies map directly to Phase 5b-ii's view-frustum culling and linear buffer representations.
+  - *Neighbor and pair queries:* For bond detection and contact search, dual-tree traversal (`query_pairs_within_range(min_dist, max_dist)`) prunes node pairs whose AABBs are separated by more than `max_dist`, achieving O(n log n) average complexity.
+- **LOD:** Implements staged LOD — ball-and-stick at close range, impostors (billboard sprites) at medium range, and surface-only at long range/when zoomed out.
+  - *Two-tier staged LOD implementation (Phase 5b-iii):*
+    - *Near tier ($\le 65.0\text{ \AA}$):* Full geometry mesh for both atom spheres and bond cylinders.
+    - *Mid tier ($> 65.0\text{ \AA}$):* Camera-facing billboard quad impostor for atom spheres, with fragment-shader circular clipping ($u^2 + v^2 > 1.0 \to \text{discard}$) and forward normal reconstruction ($N = u R + v U + \sqrt{1 - u^2 - v^2}(-F)$) with consistent lighting. Bonds/sticks are automatically culled (hidden) in the mid tier to reduce primitive overload. The fragment shader writes the depth of the sphere surface (`frag_depth`), not of the quad plane, so sticks and other atoms intersect the sphere correctly.
+    - *GPU dual-tier compaction:* Extended the WGSL Compute Shader (`cs_cull`) with distance-squared checking ($d^2 \le \text{lod\_threshold\_sq}$) against `camera_pos`. Instances surviving frustum culling are sorted and compacted into near and mid instance buffers via separate atomic counters, and rendered via dual `draw_indexed_indirect` dispatches with zero CPU readback.
+    - *Third tier ("surface-only" at long range):* Deferred to Phase 5c (Molecular Surface Display) since surface generation is not yet available; documented as a planned gap until Phase 5c lands.
+- **Streaming:** Assumes chunk-based loading/eviction rather than always keeping all 1 million atoms resident in memory as a flat array.
+
+### 4.3 Ribbon (Cartoon) Display
+The backbone coordinate sequence with secondary-structure labels computed by `proteindf-bridge` (or stand-in `AtomGroup`) is interpolated with a spline (e.g. Catmull-Rom) and sent to the GPU as a ribbon/tube mesh.
+- **Backbone extraction & selection:** Residues whose Cα atoms match `Representation.selection` are gathered per chain.
+- **Spline interpolation:** Consecutive Cα positions along each chain are interpolated using Catmull-Rom splines with sub-segment sampling (8–12 steps per residue) and a parallel transport frame to prevent twisting.
+- **Cross-sectional profile switching:**
+  - *Helix:* Broad elliptical profile (e.g., width 1.3 Å, thickness 0.3 Å).
+  - *Sheet:* Flat ribbon profile (e.g., width 1.2 Å, thickness 0.15 Å).
+  - *Loop:* Slender cylindrical tube profile (e.g., radius 0.25 Å).
+- **Rendering & fallback:** When `AppState.representations` is empty, the renderer defaults to whole-molecule ball-and-stick display for backwards compatibility. When a `Cartoon` representation is present, ribbon meshes are rendered with vertex colors (supporting `ColorScheme::SecondaryStructure`, `Chain`, `Uniform`, etc.) in the same depth-tested render pass.
+- **Fitting the camera to the structure:** The camera is fitted to the displayed structure when a structure is opened, when a workspace is opened, on File → New, when the initial state arrives from a backend, and on View → Reset Camera. It is *not* refitted when the displayed model of a multi-model structure is switched, so the view does not jump. The fit (`viewport::camera::fit_camera_to_points`) uses the atoms of the displayed model (`active_model`; all atoms when all models are shown): the target is the center of their bounding box, and the eye is placed on the +z side (looking toward −z, up = +y) at the distance where their bounding sphere around the target — plus 2 Å for the atom spheres, times a 1.1 margin — fits within the narrower of the vertical and horizontal fields of view of the viewport (so tall and wide panes both fit). With no atoms, the default camera is used. The request is a token (`Yui::request_camera_fit` increments `camera_fit_token`); the viewport widget computes the camera when it sees a new token, because only it knows the viewport's aspect ratio. To keep large structures (e.g. the backend's ~58,000-atom 1AON demo) from being clipped, the zoom distance is limited to 2–5000 Å (previously 2–500 Å) and the projection's far plane is `max(1000 Å, 4 × camera distance)` (previously a fixed 1000 Å; the near plane stays 0.1 Å). The frustum culling planes are derived from the same projection, so they follow. The fit result is not sent over collaboration. Where the camera lives, and how a fit request is delivered to each viewport, is described in §8.1 ("Second viewport and camera link"); a viewport that is re-created (e.g. after switching the Center tab to a text file and back) keeps its camera and is not fitted again. When a workspace (or the backend's initial state) is loaded, the saved camera is used as it is if it is not the default camera; a default camera (older versions never saved a moved camera) is fitted to the structure as usual.
+- **Startup state and default representations:** The frontend starts blank — the same empty state as File → New (`menu_bar::create_empty_state()`: no structure and no representations). While nothing is loaded, the Center viewport shows the hint "No structure loaded. Open a file from the Project tab or File > Open."; a structure counts as loaded when `atom_group` is set or the flattened `molecule` has atoms (the backend's demo state may carry only `molecule`). When a structure is loaded with `core::structure_loader::load_structure_into_state`, and `representations` is empty afterwards, the two default representations from `representation::default_representations()` are added: `cartoon_default` (`Cartoon`, `ColorScheme::SecondaryStructure`) and `ball_and_stick_default` (`BallAndStick`, `ColorScheme::Element`). Existing representations (created by the user or restored from a workspace) are never changed, and a failed load leaves the state untouched. The rule lives in `core` so that every loading path (the Project tab with local files or via the backend, and any future caller such as the Python API) behaves the same. The initial state fetched from a backend (`state_sync::merge_initial_state`) keeps the backend's representations as they are.
+
+### 4.4 Molecular Surface Display
+SES/SAS-equivalent molecular surfaces are generated using a volumetric Gaussian density field and extracted via the Marching Cubes pipeline (Section 4.5).
+- **Density Formulation & Citation:** The functional form of the density field as a sum of Gaussians adopts VMD's QuickSurf formulation (Krone et al. 2012; VMD User's Guide, QuickSurf):
+  $$\rho(\mathbf{r}) = \sum_{i=1}^N \exp\left( -\frac{\|\mathbf{r} - \mathbf{r}_i\|^2}{2 \alpha_i^2} \right)$$
+  - *Citations:* Michael Krone, John E. Stone, Thomas Ertl, Klaus Schulten, *"Fast Visualization of Gaussian Density Surfaces for Molecular Dynamics and Particle System Trajectories"*, EuroVis 2012 - Short Papers, pp. 67–71, 2012. DOI: 10.2312/PE/EuroVisShort/EuroVisShort2012/067-071; VMD User's Guide, QuickSurf (https://www.ks.uiuc.edu/Research/vmd/vmd-1.9.3/ug/node73.html).
+- **Parameter Derivation & Defaults (YUI-Specific Choice):** While the density function follows Krone et al. 2012, the determination of Gaussian width $\alpha_i$ is a choice specific to YUI rather than the QuickSurf paper. For each atom $i$ with van der Waals radius $r_i$ and solvent probe radius $r_{\text{probe}}$, the target surface radius is defined as $R_i = r_i + r_{\text{probe}}$. Requiring that an isolated atom's isosurface matches the threshold $C$ at distance $R_i$ determines $\alpha_i = \frac{R_i}{\sqrt{2 \ln(1/C)}}$.
+  - *Grid spacing:* 0.5 Å (default, configurable).
+  - *Probe radius:* 0.0 Å (default, aligned with PyMOL surface / VMD QuickSurf vdW envelope appearance; solvent-accessible / solvent-excluded surfaces can be generated by specifying 1.4 Å or custom values).
+  - *Isovalue ($C$):* 0.5 (default, giving $\alpha_i = R_i / \sqrt{2 \ln 2} \approx R_i / 1.17741$).
+- **Speed (`core::surface`):** the Gaussian factorizes per axis, $e^{-(dx^2+dy^2+dz^2)/2\alpha^2} = e_x e_y e_z$, so each atom builds three small 1D tables and the inner loop only multiplies (no `exp` per grid point). On the native build the density grid is split into z slabs that are filled in parallel with `rayon` (each grid point still receives the atoms in the same order, so the result equals the serial one); the WASM build fills one slab on the one thread. The Marching Cubes pass computes the gradient only at the ends of edges that carry a vertex and uses a light non-cryptographic hash for the edge-to-vertex map; the nearest-atom mapping of the vertices is parallel on the native build. The mesh is the same as before the speed-up (same vertices, order and indices, checked with a fingerprint). Measured (release build, protein-like random atom cloud, 50,000 atoms): about 2.6 s → 0.3 s on this machine; `cargo test --release -p yui-core --test surface_test -- --ignored --nocapture` prints a timing report.
+- **Complexity & Bounding:** Density accumulation is strictly localized to lattice points within the negligible-contribution cutoff radius $d_{\text{cutoff}, i} = \alpha_i \sqrt{2 \ln(1/\epsilon)} \approx 3.255 \alpha_i$ ($\epsilon = 0.005$), avoiding $O(N \cdot \text{grid})$ brute force. The grid domain is bounded by the atomic coordinates' AABB expanded by $\max(d_{\text{cutoff}}) + 2 \times \text{spacing}$.
+- **Vertex-to-Atom Mapping & Coloring:** Each generated mesh vertex is mapped to its nearest atom ID using `AtomBvh::query_nearest`. Vertex colors are resolved based on `ColorScheme` (`Uniform`, `Element`, `Chain`, `Residue`, `SecondaryStructure`) using the existing shared color palettes from atom and cartoon rendering without duplication.
+- **Atom Filtering & Multi-Model Scope:** Surface atoms are extracted by intersecting `Representation.selection` with the active model's coordinate range (`AppState.active_model` and `model_atom_ranges`), strictly isolating single models in multi-model NMR/trajectory datasets.
+- **Transparency & Rendering Pass:**
+  - Double-sided rendering (`cull_mode: None`) is adopted so that interior pockets and cavities remain visible.
+  - When `opacity >= 1.0`, surfaces are rendered in the opaque pass with depth-write enabled.
+  - When `opacity < 1.0`, surfaces are rendered after all opaque primitives (spheres, sticks, ribbons, interactions) with depth-write disabled using alpha blending (`BlendState::ALPHA_BLENDING`). Depth sorting of individual triangles is not performed; visual order artifacts under complex concave overlaps are an accepted known limitation.
+- **Mesh Generation Lifecycle & Non-Blocking Async Worker:**
+  - Surface generation is avoided per frame. Recomputation is triggered only when structural coordinates (`atom_group`), active model, or `RepresentationKind::Surface` selection, visibility, or parameters change, detected via `extract_surface_geometry_signature`. Changes to color or opacity alone reuse existing meshes and only update vertex color buffers synchronously. The Representation Inspector shows an Opacity slider (0–100 %, action `ChangeOpacity`, applied by `representation_inspector::set_opacity`) only on Surface and Interaction cards, because those are the only kinds that use `opacity`; dragging it does not change the geometry signature, so no mesh is rebuilt.
+  - In native desktop builds, computation is offloaded to iced background `Task`s (`tokio::task::spawn_blocking`) to keep the UI thread responsive. A generation tracker (`SurfaceGenerationTracker`) tags each request with a monotonic sequence counter to discard outdated results when fast sequential mutations occur. In single-threaded WASM environments, surface generation runs synchronously during state updates.
+
+### 4.5 Isosurface Generation (CPU Reference & Compute Shader)
+Isosurface extraction from scalar fields (molecular surface Gaussian density and ProteinDF electron density/MO .cube data) is designed in two stages. (CUBE input, first version: `proteindf_bridge::format::Cube` reads the file, `yui_core::cube_iso::cube_to_grid` converts dataset 0 into a `ScalarGrid` in Å (Bohr values are scaled by `BOHR_TO_ANGSTROM`; grids parallel to the x, y, z axes with positive spacing are used as they are; oblique grids and grids with a negative axis direction are resampled by trilinear interpolation onto an axis-parallel grid that covers the original one, with the spacing of the shortest grid vector, coarsened if it would exceed 8 million points, and 0 outside the original grid: `resample_oblique`), and `extract_signed_isosurfaces` runs the same Marching Cubes at `+level` and, on the sign-flipped grid, at `-level`. The default level is 0.05 for non-negative data (density) and 0.02 for data with both signs (orbital), halved from the peak if the data is smaller than that. A card at the top of the Right pane shows the file name, for orbital CUBE files an orbital selector (one dataset per orbital, `CubeSet::orbital_number`), and an isolevel slider on a log scale from peak/10000 to the peak. The work (grid conversion, extraction) runs in the background; while one run is going, further changes are not queued one by one: when it finishes, it runs again once if the wanted dataset or level differs. `frontend/src/cube_view.rs` colors the positive lobe blue and the negative one red at 0.6 opacity and draws them with the translucent surface pass, next to the molecular surfaces. The CUBE's surfaces are independent of the structure; if no structure is open when a CUBE is opened, the CUBE's atoms are loaded as the structure (`structure_loader::load_cube_atoms_into_state`; bonds from distances, no secondary structure), and an open structure is never replaced. The card also has color swatches for the positive and negative lobes (`COLOR_PRESETS`; a color change does not recompute the surface). On the native build the file's absolute path is kept in `AppState.data_paths.cube_path` so the workspace YAML reopens it (File → New and opening a workspace close the current CUBE and open the one the new state names; the path is a plain string on the machine that saved it and is not made relative). The browser build has no file path and does not reopen it.)
+- **CPU Reference Implementation (`core::surface`, Phase 5c-i):** Built first in `core` as a verifiable ground truth with strict analytical tests (sphere area and volume within $\pm 5\%$, closed 2-manifold verification, connected components). It uses a generic `ScalarGrid` that accepts arbitrary scalar fields, shared-edge vertex index welding, and outward normals derived from central-difference density gradients. It remains in `core` as a reliable reference and as a fallback for environments where WebGPU compute shaders are unavailable.
+  - *Marching Cubes Table Citation:* Uses standard 256-entry edge and triangle lookup tables from Paul Bourke (1994), *"Polygonising a scalar field"*, based on William E. Lorensen and Harvey E. Cline, *"Marching Cubes: A High Resolution 3D Surface Construction Algorithm"*, ACM SIGGRAPH 1987. DOI: 10.1145/37401.37422.
+- **GPU Compute Shader (`renderer`, Phase 5c-iii):** Ports the algorithm to WebGPU Compute Shaders (workgroup size `[8, 8, 4]`), verified against the CPU reference output for identical topology and geometry.
+
+### 4.6 High-Resolution SVG Vector Export
+File → "Export Image (SVG)..." writes the current view. `frontend/src/svg_export.rs` decides what is drawn with the same `style_layers` as the screen (visible representations, their colors, the displayed model) and passes atoms (spheres), bonds (sticks, `styled_stick_segments`) and annotation texts to `yui_core::render_svg` (`core/src/export.rs`), which returns the SVG as a string. The caller saves it with the file dialog, so the same code works in the browser (download). The matrix is the one used for drawing (`viewport::camera::view_proj_matrix`); the image is 1600 px wide and its height follows the window's aspect (the 3D pane's own size is not known to the app, so the framing can differ slightly from the screen).
+- **Projection:** a point becomes `x = (clip_x / w * 0.5 + 0.5) * width`, `y = (1 - (clip_y / w * 0.5 + 0.5)) * height`. A point with `w <= 0` is behind the camera and is dropped (for a bond, if either end is).
+- **Radius:** a length `r` (Å) at depth `w` is `r * f / w * height / 2` pixels, where `f = 1 / tan(fov / 2)` is the norm of the `y` row of `view_proj` (xyz part). Bond line width is twice that for the stick radius. This is the radius of the sphere's center plane; the true silhouette of a sphere near the edge of a wide view is slightly larger.
+- **Painter's algorithm:** atoms and bonds are sorted together from far to near by `w` (a bond uses the mean of its two ends); annotation texts are drawn last.
+- **Interaction lines:** the non-covalent interaction lines (hydrogen bonds, salt bridges, CH-π, disulfides) are exported as dashed lines (`stroke-dasharray`, flat ends) with the same filtering, colors and opacity as the screen (`interaction_render::build_interaction_lines_from_resolved`), 0.08 Å thick like the 3D lines. They are depth-sorted together with the atoms and bonds; the dash length follows the line width (3 x and 2 x, at least 4 and 3 px). The dash pattern is a constant in the SVG, not the screen shader's pattern, and a dashed line is one `<line>`, so it is not broken up by atoms in front of it other than by the painter's order.
+- **Meshes (ribbons, molecular surfaces, CUBE isosurfaces):** the triangle meshes the screen draws are exported as `<polygon>` elements (`SvgMesh`: per-vertex position, normal and RGBA color; `svg_export::build_scene` takes the cartoon from `ribbon::build_all_cartoons` and the surfaces from the same `SurfaceBatches` as the screen, so the same representations, colors and opacity apply; during playback in the browser build the surface is left out like on screen). Each triangle is one flat color: the mean of its vertex colors times the screen's light, `0.35 + 0.65 * max(dot(n, l), 0)` with `l` the screen's fixed world-space light (the face normal is the mean of the vertex normals, not flipped for back faces, as in `fs_main`). Opaque triangles are depth-sorted (by the mean `w`) together with atoms and bonds and get a thin stroke of their own color (0.6 px) so that no hairline gaps show between neighbours; the opaque surface is closed, so its back faces (normal pointing away from the camera, `SvgScene::eye`) are dropped, which about halves the file; ribbons and translucent surfaces keep both sides. Triangles with `alpha < 1` are drawn after all opaque shapes, far to near, without a stroke (as the screen draws its translucent pass). Limits of a painter's algorithm on a triangle soup: interpenetrating or large triangles can overlap wrongly (atoms inside a ribbon, a ribbon through a surface), and anti-aliased edges of neighbouring translucent triangles can show faint seams; use the PNG export when this matters. The file grows with the mesh (1HLS: cartoon 0.8 MB, surface 2.2 MB, both with a translucent surface 4.4 MB); more than `MAX_SVG_TRIANGLES` (500,000, counted after the back-face cut) is an error that suggests hiding the surface, `render: surface_grid_spacing`, or PNG. The selection highlight is not exported.
+- **Canvas size and framing (SVG, PNG, animation):** the three export dialogs share `canvas::CanvasOptions`. *Shape*: **3D pane** (the aspect of the first 3D viewport as it was last drawn on screen: `ViewportProgram::draw` stores the `bounds` size in `ViewportSizes`, which `Yui::export_canvas` reads; before anything is drawn it falls back to the window's aspect), 1:1, 4:3, 3:2, 16:9, or Custom (width x height typed in, 16 to 16384 px per side; the dialog's width choices are then ignored). *Framing*: **As on screen** keeps the screen's camera and vertical field of view (a tall canvas can cut the sides, a wide one shows more at the sides), or **Fit all** (`canvas::fit_keep_direction`, which uses `fit_camera_to_points`): the camera keeps its direction, up and field of view and moves its target to the center of the shown structure and its distance so that the bounding sphere (with the atom margin) fits the shorter side of the canvas. `Yui::export_canvas` gives the size and the camera, which the SVG (`render_view_svg(.., camera, size)`), PNG (`offscreen_primitive_with`) and the animation (the base camera of Spin / Rock; sizes are made even) use. The SVG dialog (new) also offers the width (800 to 3200 px). A PNG larger than the adapter's texture limit fails with a message; smoothing is lowered automatically first.
+- **PNG (raster) export:** File → "Export Image (PNG)..." draws the view itself, so everything on the screen is included (spheres, sticks, cartoon, molecular surfaces and CUBE isosurfaces, interaction lines, background), without the selection highlight. `Yui::offscreen_primitive` builds the same `ViewportPrimitive` as the screen (`ViewportProgram::draw` with the app's camera), and `viewport::offscreen` draws it with its own wgpu instance and device (any adapter, a software one is fine) into an `Rgba8UnormSrgb` texture, reads it back (rows padded to 256 bytes, then packed), and `png_export` saves it after the file dialog. The menu item first opens a small dialog (`png_export::view_png_dialog`, options `PngOptions`, remembered for the next time): width 1000 / 2000 / 3000 / 4000 px (the height follows the window's aspect; as for SVG, the 3D pane's own size is not known to the app), smoothing Off / 2x / 3x, and background Scene color / Transparent. Smoothing draws at that factor and averages down for anti-aliasing; the averaging is done in linear light (`downsample_box`), and the factor is lowered one step at a time until the drawn size fits the adapter's texture limit and 64 million pixels (`fit_supersample`). For a transparent background the background pass is skipped (`ViewportPrimitive::draw_background = false`) and the target is cleared to transparent; the GPU's alpha blending then leaves premultiplied colors, which `downsample_box` averages and divides by alpha to get a normal PNG with alpha (this is also done at smoothing Off). The GPU work and the readback wait run in `spawn_blocking` on the native build; in the browser build it is awaited, and the browser pumps the readback. The headless render test (`viewport/headless.rs`, TESTING §7) uses the same `offscreen` module.
+- **Animation export (desktop: a folder; browser: a zip):** File → "Export Animation..." writes numbered PNGs (`frame_0001.png`, ...) to a folder, and runs `ffmpeg` (if it is on the PATH) to make `movie.mp4` (H.264, yuv420p; otherwise the exact command is shown in the status bar). The dialog (`movie_export::view_movie_dialog`, `MovieOptions`) chooses the motion: **Spin** (one full turn of the camera about the vertical screen axis, `camera_for_frame` with `orbit_camera`; the frame after the last would be the first, so the movie loops), **Rock** (one period of the camera rock of §8.11) or **Frames** (every model of a multi-model structure or every frame of an XYZ trajectory, once, from the first to the last); the frame rate (15 / 24 / 30), the length of Spin / Rock (4 / 8 / 12 s), the width (960 / 1280 / 1920 px; width and height are made even for the encoder), the smoothing (Off / 2x) and whether to make the MP4. The frames are rendered one at a time by a state machine in `app/movie_ops.rs`: on the UI thread it chooses the camera (or shows the frame with `show_frame`) and builds the same `ViewportPrimitive` as the screen (`offscreen_primitive_with`); the drawing, downsampling and file writing run in `spawn_blocking` with one shared `OffscreenRenderer` (the GPU device and pipeline are created once per export), and on completion the next frame starts. A bar above the panes shows the progress and a Cancel button; written frames are kept on cancel, and the shown model is restored for the Frames motion. Molecular surfaces are included for every motion: Spin / Rock use the current ones, and for Frames the surface is rebuilt for each frame from that frame's atoms, just before drawing, in the same blocking task as the drawing (`SurfaceWork`: the build requests from `Yui::surface_build_requests` after `show_frame`, and an owned `SurfaceColorContext` made once per export for the vertex colors; atom ids, elements, chains, residues and secondary structure do not change between frames). The cost is one surface build per frame (about 43 ms per surface for the 782 atoms of 1HLS in a release build, measured earlier), so a Frames export with a surface is slower; the interaction lines and CUBE isosurfaces are handled as before. Selection highlights and transparent backgrounds are not used. The window must not be used while it runs. **Browser build:** there is no folder and no `ffmpeg`, so the same dialog (without the MP4 row; the button says "Start") keeps every PNG in memory (`MovieJob::to_memory`, `frames`, `bytes_kept`) and, after the last frame, packs them into one `yui-animation-<version>.zip` with `zip_store::build_zip` (an uncompressed "stored" zip with CRC-32, no dependency; at most 65,535 files and 4 GiB) and offers it as a download through the save dialog (`movie_export::save_zip`, the same way as the PNG export; the status bar then shows the `ffmpeg` command to make a video from the unzipped frames). The kept PNGs are limited to 400 MB (`WEB_MAX_FRAME_BYTES`; the zip needs the same again) and the export stops with a hint to use a smaller width, fewer frames or the desktop app when it would be exceeded. Everything else is shared with the desktop build: the renderer (`OffscreenRenderer` is no longer desktop-only; in the browser it is driven by `await` instead of a blocking thread, since the browser advances the GPU readback), the frame planning, per-frame surfaces for Frames (built synchronously, so the page is busy while it runs), supersampling, the 3D pane aspect and SSAO. The code is the same for both targets: `render_frame_png` returns the PNG bytes and the desktop `render_frame_to_file` writes them. The browser path itself (WebGPU in a real browser, the download) has not been run by the developers; the memory path was run on the desktop renderer and the zip was checked with Python's `zipfile` and `unzip -t`.
+
+### 4.7 Publication-Quality Offline Rendering (Phased Rollout)
+- **Phase A (priority; SSAO done as an option, off by default):** Rasterization + SSAO (Screen Space Ambient Occlusion). Cheap and usable for both real-time and offline rendering. `shaders/ssao.wgsl` runs as a separate full-screen render pass after the 3D pass (`primitive.rs`, step 8), only when `render.ssao_strength` in the settings file is above 0 (the default is 0, so nothing changes unless it is enabled). It reads the depth texture the 3D pass just wrote (`Depth32Float`, bound as an unfilterable float `texture_2d<f32>` with `textureLoad`, because `textureLoad` on a `texture_depth_2d` does not work on the GL backends, i.e. WebGL2 and the Mesa software renderer) and never reads the colors; its output is a factor that is *multiplied* into the existing color (blend `src * 0, dst * src`; the alpha is kept), so it only darkens, touches only the 3D pane (viewport and scissor of the pane), and leaves the background (depth 1.0) alone. Per pixel: view-space position from the depth (`near`, `far`, the field of view and the pane size in `SsaoUniforms`), the surface normal from the smaller-difference neighbours, then 24 samples on a golden-angle spiral (rotated per pixel by an interleaved-gradient noise) within `render.ssao_radius` angstroms (converted to pixels at the pixel's depth, 2 to 96 px); a sample counts as an occluder when it lies above the tangent plane (`smoothstep(0.1, 0.5, dot(n, v) / |v|)`) and within the radius (falling off to 0 at the radius); the factor is `1 - strength * 3 * occluded fraction`. The same code draws the PNG export and the animation frames (an off-screen draw goes through the same `prepare` / `render`), so supersampling and the radius in pixels stay consistent; the SVG export has no SSAO. The first pass writes the factor into its own `R8Unorm` texture (same size as the depth texture; cleared to 1 outside the pane) and the second pass (`fs_blur`) multiplies a blurred copy into the color: a 5 x 5 bilateral blur (Gaussian weights, sigma 1.5 px) that mixes only neighbours whose linear depth differs by less than about a quarter of `ssao_radius` (so occlusion never bleeds across an outline) and ignores background pixels; the blur averages the per-pixel noise away. Limits: a faint residual texture can remain at very high strength (the blur radius is fixed at 2 px); translucent surfaces and the selection glow do not write depth, so they neither cast nor receive occlusion; the occlusion is only as sharp as the depth buffer (a very large `far` plane coarsens it).
+- **Phase B (lower priority):** Adds path/ray tracing for soft shadows and AO (Ambient Occlusion), offering quality comparable to ChimeraX's `ray` feature or Blender Cycles, as an option for offline export for publications.
+
+### 4.8 WebAssembly / Browser Rendering Targets (Phase 6c-i)
+- **Backend Selection:** `wgpu` automatically negotiates between WebGPU (primary for modern Chrome/Firefox/Safari) and WebGL2 (fallback).
+- **Canvas Lifecycle & HiDPI Alignment:** `iced::application` automatically attaches to the HTML DOM `<canvas>`. The 3D viewport pipeline maintains its `Depth32Float` attachment strictly matched to the surface's physical dimensions (`viewport.physical_width/height`), applying `set_scissor_rect` and `set_viewport` dynamically to match `pane_grid` boundaries and preventing HiDPI framebuffer mismatch panics.
+- **Shader Portability:** WGSL shaders are cross-compiled via `naga` to the active browser backend. Both ball-and-stick instancing and ribbon/cartoon Catmull-Rom meshes execute uniformly across native and WASM builds.
+
+### 4.9 Multiple Viewports (shared pipeline, per-viewport resources)
+`iced` creates exactly one `shader::Pipeline` per type, so two 3D viewports share one `ViewportPipeline` (`frontend/src/viewport/pipeline.rs`); anything that `prepare` writes must therefore be separate per viewport, or the two viewports would overwrite each other's buffers before the frame is drawn. The resources are split as follows:
+- **Shared (created once):** the shader modules, all render pipelines and the culling compute pipeline, the bind-group layouts, the master sphere/cylinder/impostor-quad meshes, and the depth texture. The depth texture can be shared because every render pass clears it to 1.0 before drawing and the passes run one after another.
+- **Per viewport (`ViewportResources`, keyed by `ViewportId::{Primary, Secondary}` in `ViewportPipeline::viewports`):** the camera uniform buffer and bind group, the background uniform buffer and bind group, the sphere and stick source/culled/indirect buffers with their culling uniforms and bind groups, and the ribbon, molecular-surface (opaque and transparent) and interaction buffers.
+`ViewportProgram` and `ViewportPrimitive` carry the `ViewportId`; `prepare` and `render` use only the resources of their own id. Resources are created the first time an id is prepared and released at the end of a frame in which the id was not prepared (`shader::Pipeline::trim`), so turning the split off frees the second viewport's buffers. The bookkeeping (`ResourceLedger`) is separate from the GPU objects so that it can be unit-tested.
+
+---
+
+### 4.10 Selection Highlight (Halo / Glow)
+Selected atoms (§8.9) are highlighted on top of any display style — also when only the cartoon is shown. The highlight is drawn in the same render pass as the molecule, after the surfaces, from one instance per selected atom (`ViewportPrimitive::selection_instances`: the atom position, the radius used for the ball-and-stick sphere (`radius × 0.35`), and the highlight color from the UI palette (`UiPalette::selection`, §8.8)). Each viewport keeps its own instance buffer (`ViewportResources::selection_instance_buffer`), so both viewports show the same selection independently. The shader is `frontend/src/viewport/shaders/selection.wgsl`; the pipelines reuse the sphere-impostor quad and the camera bind group, test depth against the scene (`LessEqual`) and do not write depth, so a highlight is hidden by atoms in front of it. Billboards are pushed back by half the atom radius so they do not overwrite a mid-distance impostor sphere that lies in the same plane.
+- **Halo:** a ring around the atom. The billboard has a half-width of 1.5 × the radius; the ring covers 1.0 – 1.3 × the radius with smooth edges (alpha blending). It looks like an outline around the atom's sphere.
+- **Glow:** a soft light around the atom. The billboard has a half-width of 3.0 × the radius; the intensity falls from the center to the edge as `exp(-3.5 r²)`, shifted to reach 0 at the edge, times 0.85. It is drawn with premultiplied-alpha blending (`One`, `OneMinusSrcAlpha`), so it glows on a dark background and still shows as a tint on a light one. Neighboring selected atoms overlap and blend into one glow.
+- **Differences from a screen-space glow:** this is a per-atom sprite, not "render a mask, blur it, composite it". It needs no off-screen textures (nothing to resize or to keep per viewport, and nothing extra for WebGPU), but the glow is a fixed shape around each atom rather than a blur of the exact silhouette, and its size scales with the atom radius, not with the screen. A mask-and-blur glow can replace it later without changing the selection state or the setting.
+- **Switching:** View → Selection Highlight: Glow (default) / Halo / Off (§8.9). With Off, no instances are sent.
+
+## 5. Multi-Threading & Asynchronous Streaming Design
+
+【I/O Thread (Tokio)】　　　　　【CPU Compute Thread (Rayon)】　　【GPU (VRAM)】
+
+- Large-data loading from disk and receiving computed data over the network are executed as asynchronous tasks (Tokio), fully decoupled from the main (UI) thread.
+- PDB file parsing, frame interpolation (computing intermediate frame coordinates for animation), and chunk-based loading/LOD determination are distributed evenly across CPU cores and computed in parallel using `Rayon`'s work-stealing thread pool.
+- When playing back continuous trajectory data, three instance-buffer slots (triple buffering) are allocated in GPU memory, and parsed data for the next frame is asynchronously uploaded into the currently-hidden buffer slot, achieving smooth playback without blocking rendering.
+- **Trajectory playback (multi-frame XYZ; implemented).** `core::xyz_trajectory` and `frontend/src/trajectory.rs`, `app/trajectory_ops.rs`.
+  - *Format and parser.* Multi-frame XYZ: each frame is an atom-count line, a comment line (`step=N` is read as the step) and one `element x y z` line per atom; every frame has the same atom count. The parser is YUI's own: `proteindf-bridge` (tag `2026.10.1`) `Xyz` reads only the first frame of a file, and the bridge has no GRO multi-frame, DCD, XTC, TRR or NetCDF reader; these are recorded as requests to the bridge in the ROADMAP and are not handled here.
+  - *Loading.* The file is scanned once to build an index of the byte range of every frame (`index_xyz`; atom lines are not parsed, a changed atom count or a truncated frame is an error). During playback only the frame that is needed is read and parsed (`XyzTrajectory::read_frame`): on native from the file with a seek (`from_file`, memory use does not grow with the number of frames), in the browser from the bytes held in memory (`from_bytes`). No read-ahead and no triple buffering (the design above) is implemented: a frame is read when it is shown.
+  - *Opening.* File → "Open Trajectory (XYZ)..." (needs a structure) or opening an `.xyz` file from the Project tab ("Trajectory (XYZ)" is the default way to open it; "Text Editor" is the other). From a backend the file is fetched with the existing, secured `/api/fs/read` (path validation, roles); no new backend API is added. (`GET /api/trajectory/frame/{index}` is a demo that reads a fixed `demo_trajectory.xyz` and takes no path.) The trajectory must have the same number of atoms as the displayed structure, in the same order (elements are not compared); otherwise it is an error shown in the status bar. File → "Close Trajectory" restores the coordinates of the structure from before the trajectory was opened. Replacing the structure (opening a structure or workspace, File → New) closes the trajectory.
+  - *Playback.* The trajectory becomes the frame source of the playback core (§8.10): the same control bar, commands and keys as the multi-model playback; the status bar shows `step N (i/total)`. It is per user: `AppState.trajectory` is not used, and nothing is shared over collaboration or saved in the workspace (the saved coordinates are those of the frame shown).
+  - *What a frame change updates.* The coordinates are replaced in the structure tree (`AtomGroup`, via `atom_group::set_flat_positions`; the cartoon and the interaction endpoints read it) and in the flattened `Molecule` cache (spheres, sticks, picking, the molecular surface); the endpoints of the non-covalent interactions are resolved again from the tree each frame (the interactions themselves are detected once, when the structure is loaded). The ball-and-stick, picking and bond fallback structures (BVH) are built from `Molecule` when drawn, so they follow. Atom IDs, bonds, the secondary structure and the selection do not change. The molecular surface follows the shown frame with a delay while playing (as in §8.10). Exporting a structure writes the structure tree as it is, i.e. the frame being shown.
+- In the WASM client environment, to work around the browser's local file I/O restrictions, on-demand streaming based on HTTP fetch is performed via `wasm_bindgen_futures::spawn_local`.
+
+---
+
+## 6. Scripting & Extensibility
+
+### 6.1 Python Integration
+To minimize the learning curve, the platform supports **real Python** rather than a custom DSL.
+
+- **Native build:** `PyO3` exposes Rust's `AppState` manipulation API as Python bindings (e.g. `import yui; yui.select("A").color("blue")`, similar to PyMOL/ChimeraX APIs).
+- **Web build:** Uses `Pyodide` (Wasm-compiled CPython). Since the runtime size is large (tens of MB), the initial load is made asynchronous and cached.
+- To maintain API compatibility between native and web, `core` provides a thin Python-facing facade module that both runtimes can call into uniformly.
+
+### 6.2 Selection & Representation Model — No New Rendering DSL
+
+For the same reason as the learning-curve policy in Section 6.1, no new custom DSL is introduced for specifying rendering. Instead, a two-layer structure is used:
+
+1. **Selection layer (`Selector`):** Ports `proteindf-bridge`'s `Select_*` predicate family (`Select_Symbol`, `Select_Name`, `Select_Path_wildcard`, `Select_PathRegex`, `Select_Range`, `Select_Atom`, `Select_AtomGroup`) to Rust, and **newly adds `And`/`Or`/`Not` boolean composition combinators** that don't exist in the original. This `Selector` becomes the single selection language shared by the Python API, YAML configuration, and `proteindf-bridge` itself.
+2. **Representation layer (`Representation`):** Held in `AppState` as a structured data type — `{ selection: Selector, kind: BallAndStick|Cartoon|Surface|Licorice|Cpk|Line|Interaction, color: ColorScheme, opacity: f32, visible: bool, interaction_kinds: Vec<InteractionKind>, hides_atoms: bool }` (serialized as-is as fields in YAML, and assembled from Python via a method chain such as `yui.select(...).show(...).color_by(...)`). Both merely point to the same internal model, so there is no need to maintain multiple parsers. `Representation` is kept as a list, and overlaps are resolved last-wins (PyMOL style). A card with `hides_atoms: true` (the tree / viewport "Hide") draws nothing itself and, while visible, removes its atoms from every atom-style layer and hides the cartoon of each residue whose CA atom it covers (the ribbon is split there, so it does not bridge the hidden part).
+3. **One-line REPL shorthand:** A PyMOL-style one-line syntax such as `show cartoon, A/*` could be added in the future as thin syntactic sugar over Python calls, but this is **out of scope (backlog)** and not a priority for initial implementation.
+
+**Atom representation styles (`frontend/src/viewport/scene.rs`, `AtomStyle`):** `BallAndStick`, `Cpk` (Spacefill), `Licorice` and `Line` all draw atoms with spheres and cylinders, and differ per atom: Ball & Stick is a sphere of 0.35 × the van der Waals radius with a gray 0.12 Å stick; Spacefill is a sphere of the full van der Waals radius with no sticks; Licorice is a 0.2 Å stick with a sphere of the same radius at each atom so that joints are smooth; Line is a 0.04 Å stick and no sphere. Ball & Stick bonds are gray cylinders; Licorice and Line bonds are split at the midpoint into two halves colored by atom; Spacefill has no sticks. Each visible representation is drawn on its own with its own selection and color scheme (`style_layers`, as in VMD), and they are overlaid: an atom that is in a Spacefill and a Ball & Stick representation is drawn with both, so the Ball & Stick is hidden inside the large sphere. The eye toggle of a card affects only that card. Hiding atoms in every representation is a separate kind of card, one with `hides_atoms: true`: it draws nothing and, while it is visible, removes its selected atoms from every representation (the tree's and the viewport menu's Hide create it; its eye toggle turns the hiding off and on). Clicking and the selection highlight use the same radius, and a Line atom, which has no sphere, can still be picked within 0.15 Å. Line is drawn with thin cylinders, not with GPU line primitives, so its width is in Å and does not stay one pixel wide when zooming.
+
+**Path wildcard/regex matching (stand-in semantics):** Until `proteindf-bridge`'s real `Select_Path_wildcard`/`Select_PathRegex` land (Chapter 10), any local stand-in `Selector` implementation must follow this matching rule, so that behavior does not need to be reworked once QCLObot integration (Section 11.1) starts relying on it: a path is a `/`-delimited sequence of segments, with leading/trailing slashes ignored — so `/A/6` and `/A/6/` denote the same two-segment path `["A", "6"]`; a `*` segment in the pattern matches exactly one arbitrary segment at that position (single-level glob; no recursive `**` in this stand-in); a pattern matches an `AtomGroup` node when the node's path segments equal the pattern's segments position-by-position; and matching an intermediate node (e.g. a residue) resolves to every atom in the subtree rooted at that node, so the presence or absence of a trailing slash carries no separate meaning. This is a deliberate simplification, to be reconciled with `proteindf-bridge`'s actual behavior once that crate lands.
+
+**`ColorScheme` scope for the initial implementation:** The `ColorScheme` type starts with only `Element | Chain | Residue | SecondaryStructure | Uniform`. Scalar-value-driven coloring (per-atom Mulliken orbital contribution, B-factor, RMSF, etc.) is **not** a `ColorScheme` variant — it is layered on top of the base color via the `ScalarOverlay` mechanism defined in Section 12.2, and is only added when Chapter 12 is implemented.
+
+### 6.3 Voice Input
+Text captured via the Web Speech API is fed into the AI chat assistant described in Chapter 14 as a chat message, rather than being handled by a separate pipeline; see Section 14.6 for how voice relates to the assistant's tool-calling loop over the Python API described above.
+
+---
+
+## 7. Real-Time Collaboration
+
+### 7.1 Role Model
+- **Host (Professor):** Holds 100% of the write permission for `AppState`. Has the trigger right for forced viewpoint synchronization ("Follow Me").
+- **Editor (Student):** Has permission to add annotations and manipulate specific residues.
+- **Viewer:** Read-only.
+
+**Token resolution:** `RoleResolver` (`core/src/role.rs`) turns an opaque secret string into a `UserRole`. The implementation is `TokenStore` (random secrets, constant-time comparison, secrets shorter than 16 characters refused); the old fixed numbers 1 / 2 / 3 (`SimpleRoleResolver`) are gone. The secrets are issued at start-up by `backend` (§7.4). The `role_token` field of the collab packet header (§7.3) is no longer consulted: the role is bound to the connection when it is accepted.
+
+### 7.2 Transport Abstraction
+With future protocol migration in mind, the transport layer is abstracted behind a trait.
+
+```rust
+pub trait CollabTransport {
+    type Error: std::fmt::Debug;
+    fn send(&mut self, packet: CollabPacket) -> Result<(), Self::Error>;
+    fn recv(&mut self) -> Result<Option<CollabPacket>, Self::Error>;
+}
+```
+
+- **Crate placement:** To preserve `core`'s platform independence and WebAssembly (`wasm32-unknown-unknown`) compatibility, `core` defines only the pure `CollabPacket` data structure and the `CollabTransport` trait without network dependencies. Concrete transport implementations (`tokio-tungstenite`, `axum` WebSocket, etc.) reside in `backend` and `frontend`.
+- **Initial implementation:** `WebSocketTransport`. Works stably across all browsers (including Safari), and the Rust ecosystem (`tokio-tungstenite`/`axum` on native, `gloo-net` on WASM) is mature. In WASM, since `gloo-net::websocket::futures::WebSocket` wraps browser DOM objects and is `!Send`, `frontend` runs the socket within `wasm_bindgen_futures::spawn_local` and bridges messages over `tokio::sync::mpsc` channels to satisfy `iced`'s `Stream + Send` subscription requirements.
+- **Future implementation:** `WebTransportTransport` (QUIC/HTTP3). Unreliable datagrams avoid head-of-line blocking, which is advantageous for high-frequency, low-latency sync such as laser pointers. The migration decision will depend on browser support status (Safari/Firefox) and the maturity of Rust server implementations (e.g. `wtransport`).
+- `CollabPacket` (header: SenderID/RoleToken/Timestamp + `AppStateDelta` payload) is a transport-independent common format, so application-layer code requires no changes when the implementation is swapped.
+
+### 7.3 Delta Message Sync
+Rather than the entire `AppState`, only the change delta is serialized with MessagePack and sent. The server validates the `RoleToken` and discards unauthorized write requests.
+
+---
+
+### 7.4 Backend Authentication and Exposure (step 1 implemented; the rest is design)
+The stand-in of §7.1 must be replaced before `backend` is used by more than one person or reachable by anything but the user's own programs. This section is the design; the order of work is Phase 6j in `ROADMAP.md`.
+
+**What is wrong today (found while designing; true even with the `127.0.0.1` bind):**
+- *Any web page the user visits can run commands on the machine.* Browsers do not apply the same-origin policy to WebSocket, `backend` does not check the `Origin` header, the Host token is the fixed number `1`, and `/api/terminal` starts a shell for it; `CorsLayer::permissive()` also lets any origin read the REST responses (`/api/fs/read`, the state). A page only has to open `ws://127.0.0.1:8080/api/terminal?token=1`.
+- Other users of the same computer (a shared workstation or a cluster login node) can reach the port and use the same tokens.
+- DNS rebinding: a name that a page controls can resolve to `127.0.0.1`; `backend` does not look at the `Host` header.
+- Not yet reachable, but to be ruled out before any exposure: eavesdropping and brute force over a network.
+
+**Design:**
+1. *Origin and Host checks (first, small).* A WebSocket upgrade, and every REST request that is not a plain asset, is accepted only when `Origin` is absent (the native app and command-line tools send none) or equals one of the backend's own origins, plus an allow-list (`YUI_ALLOWED_ORIGINS`, empty by default); the `Host` header must be `127.0.0.1:<port>`, `localhost:<port>` or a configured name. `CorsLayer::permissive()` is removed (the web bundle is served from the same origin, §14.3). This closes the web-page hole by itself, whatever the tokens are.
+2. *Random secrets instead of 1 / 2 / 3 (implemented, Phase 6j-ii).* At start `backend` generates a 256-bit random secret from the OS CSPRNG (64 hex characters) for the Host role, kept in memory only and compared in constant time (`TokenStore`); `YUI_TOKEN` sets it instead (at least 16 characters, no spaces or commas). `RoleResolver` resolves an opaque string instead of a `u64`. The role is bound to the *connection* when it is accepted (`auth::guard` puts an `Auth` into the request), so the per-packet `role_token` in the collab header is no longer consulted (the field stays in the format for compatibility). Every `/api/` route needs a secret (401 without one, 403 for an unknown one) except the bundled font; reading the state is open to every role, writing it (`POST /api/state`, `/api/structure`) and the terminal need the Host role.
+3. *Delivery without leaking (implemented, Phase 6j-ii; this replaces the single-use ticket of the first design).* The secret is never put in a URL (history, logs, `Referer`). REST: `Authorization: Bearer <secret>`. WebSocket: the same header from the desktop app, and from the browser, which cannot set headers on a WebSocket, the subprotocol `yui.token.<secret>` (`backend` echoes it back, as browsers require). A ticket endpoint was considered and dropped: it would only move the same secret into one more request, and headers / subprotocols already keep it out of URLs. How a client learns the secret: `backend` writes `<config>/yui/backend.json` (`{url, token, pid}`, file mode 0600) at start, which the desktop app on the same computer reads (`--token <secret>` or `YUI_TOKEN` override it, for a remote `backend`); for the browser build `backend` prints `http://127.0.0.1:8080/#token=...` when it serves the web bundle (a URL fragment is never sent to the server or logged), and the page moves the secret into `sessionStorage` and clears the address bar (`frontend/src/backend_auth.rs`). A stale `backend.json` (the backend was restarted) just fails authentication.
+4. *Invitations for shared sessions (implemented, Phase 6j-iii).* The Host creates Editor / Viewer secrets with `POST /api/invites {"role": "editor"|"viewer", "ttl_secs": 60..604800 (default 3600)}` (Host only; the answer holds the secret, the only time it is shown, with an `id` and `expires_at`), lists them with `GET /api/invites` (no secrets) and revokes one with `DELETE /api/invites/{id}`. At most 50 are active at once; they live in memory only (a restart ends them all). Using one is the same as the Host secret (`Authorization: Bearer` / the subprotocol): the role is that of the invitation, an invitation can never create invitations, change the state or open `/api/terminal`, and an expired or revoked one is refused. A connection opened with an invitation (`/api/collab`, `/api/logs`) is closed at once when its invitation is revoked (the revocation is broadcast to the open connections) and at the expiry time (the connection sleeps until then; there is no polling). `scripts/yui-invite.py create viewer --ttl 3600 | list | revoke <id>` is the command-line way (it reads `backend.json`, prints the token, the browser address with `#token=` and the desktop command; no dependencies besides Python). In the app: **File → Share Session...** (`frontend/src/share_dialog.rs`) chooses the role (Viewer / Editor) and the lifetime (1 hour / 1 day / 7 days), creates the invitation, shows its browser address and token (once) with "Copy link" / "Copy token", lists the active invitations from the backend and revokes them; with a non-Host secret the backend's 403 is shown. `InviteInfo` also carries `expires_in_secs` (remaining time at the moment of the answer) so a client needs no clock.
+5. *Binding (implemented, Phase 6j-ii).* The default stays `127.0.0.1:8080`. `YUI_BIND` (e.g. `0.0.0.0:8080`) may change it, but a non-loopback address is refused at start unless TLS is terminated by a reverse proxy declared with `YUI_BEHIND_TLS_PROXY=1` (`backend` itself speaks plain HTTP); and on a non-loopback bind `/api/terminal` and `/api/fs/*` answer 403 unless `YUI_ENABLE_TERMINAL=1` / `YUI_ENABLE_FS=1` are set, so sharing a session never exposes a shell by accident. TLS itself is the reverse proxy's job.
+6. *Abuse limits and traces (implemented: logging in 6j-i, the limit in 6j-iii).* Failed authentications (an unknown secret; a request with no secret is not counted, since a client without a token reconnects over and over) are counted per peer address (`ConnectInfo`): 10 failures within 60 seconds lock that address out for 60 seconds, during which every request gets `429 Too Many Requests` with `Retry-After`, even one with a valid secret. The lock-out is logged once; invitations created and revoked are logged by id (never the secret). Behind a reverse proxy every client has the proxy's address, so the limit is shared among them (the secrets are 256 bits, so this is about noise, not about guessing).
+- **Out of scope for now:** user accounts, OIDC / SSO, per-user permissions inside a role, and end-to-end encryption of collaboration data.
+- **Status of step 1** (`backend/src/origin_guard.rs`, a middleware in front of `/api/`) and the logging of failed authentications and terminal sessions are implemented (Phase 6j-i). `YUI_ALLOWED_ORIGINS` / `YUI_ALLOWED_HOSTS` take comma-separated lists. A page served by `trunk serve` (development) reaches `backend` through the proxy with another origin; if it gets 403, set `YUI_ALLOWED_ORIGINS=http://127.0.0.1:8085` (the `trunk serve` port). The check compares the `Origin`'s host and port with the `Host` header, ignoring the scheme, so a TLS-terminating proxy that keeps the `Host` works unchanged.
+- **Order of work:** (a) step 1 and the logging of step 6 — done (Phase 6j-i); (b) steps 2, 3 and 5 — done (Phase 6j-ii); (c) step 4 (invitations) and the rate limit of step 6 — done (Phase 6j-iii). Checked in a real browser (Chrome 155, headless, driven over the DevTools protocol): the web bundle served by `backend` takes the `#token=` fragment, keeps it in `sessionStorage`, clears the address bar, and its REST fetch and collab WebSocket (subprotocol) are accepted; from the same origin a fetch needs the header (401 without, 200 with) and a terminal WebSocket opens with the subprotocol echoed back; from another origin (`http://127.0.0.1:9999`) even a request with the valid token is refused (fetch fails on CORS, WebSocket closes with 1006, the backend logs `OriginNotAllowed`). The page itself could not draw there: headless Chrome has only the software WebGPU adapter, which the app refuses by design (the diagnostic overlay). Not done: closing a connection the moment (not within 5 seconds) its invitation ends.
+
+## 8. User Interface (VSCode-like UI)
+
+### 8.1 Layout
+Using `iced::widget::pane_grid`, the user can drag-resize and split four physical dock regions: Left, Center, Right, and Bottom. `pane_grid` itself already provides the generic split/resize/drag mechanics regardless of what content a pane holds.
+
+What content is docked in each region is decoupled from the region itself (Phase 6d-iii): rather than a fixed `PaneKind`-per-region assignment, each pane holds a tab list of runtime `ViewId`s, and any registered view (3D Viewport, structure/file tree, Representation inspector, Python Console, Terminal, Log Viewer, AI Chat, and future views such as a script editor) can be docked in any region via a tab bar, following the tab-switcher pattern first proven in the Bottom pane. `state.yaml` (§8.2 File Open/Save) persists which views are open and active per region. The default layout is: Left = structure tree / named selections / project tree tabs, Center = 3D Viewport tab followed by one tab per open text file, Right = Representation inspector, Bottom = Log Viewer / Python Console / Terminal / AI Chat tabs (see Chapters 13/14). Text files are edited in the Center area (next to the molecule) rather than in the Bottom pane.
+
+**Editor groups (data model).** The layout is a `PaneLayout` (`frontend/src/pane_view.rs`): the tab lists of the fixed docks (`PaneKind::Left` / `Right` / `Bottom`) and of the editor groups (`PaneKind::Group(GroupId)`), plus a tree `GroupNode` that arranges the groups in the Center area (one group, or a split). The tree drives the Center part of the `pane_grid` configuration (`menu_bar::build_pane_configuration`). Where a view goes is one rule, `pane_view::home_group`: the 3D Viewport in the first group, the second viewport in the second group (only while split), documents in the last group. The saved YAML keeps the `pane_views` map with the same keys and order as before (`left`, `center`, `right`, `bottom`, `center_right`); the tree is rebuilt from the groups on load. The tree is the source of truth for the arrangement: groups can be split any number of times, left/right or top/bottom (`GroupNode::split_leaf`), and a group that has no tab left is removed (`GroupNode::remove_leaf`, `PaneLayout::prune_empty_groups`; the last group is kept) when a tab drag ends and when a file is closed. A new group gets the next unused number (`group_N` in the YAML; the first two are still `center` and `center_right`). The tree is saved in the workspace YAML as `editor_layout` next to `pane_views` (`SavedGroupNode`, written only when there is more than one group), with the sizes the user dragged (`Yui::sync_editor_ratios` copies them from the grid before saving):
+
+```yaml
+editor_layout:
+  split: stacked        # side_by_side (left/right) or stacked (top/bottom)
+  ratio: 0.3            # share of the first (left/top) side
+  a: { group: center }  # groups use the pane_views keys
+  b: { group: group_2 }
+```
+
+On load (`PaneLayout::set_editor_tree`), a group that has tabs but is missing from the tree is added at the right, and a tree leaf without tabs is removed with the other empty groups. A tree with a key that is not a group, a group used twice or a ratio outside 0–1 is ignored. A YAML without `editor_layout` (older versions, or one group) lays its groups out left to right in number order. `home_group` is where a view goes when it is *added* (a new document, the split, a loaded layout missing a viewport); a tab the user dragged elsewhere stays there.
+
+**Moving tabs between editor groups.** While a tab is being dragged (see the tab bar under Palette in §8.8), entering a tab of *another editor group* moves the dragged tab to that place (`PaneLayout::move_view_between`, which selects it in the target and keeps the selection of the source), and the drag continues in the target group. Dropping it on the body of a group (below its tab bar) depends on where: the middle appends it to that group, an edge (the outer quarter on each side) splits that group in that direction and moves the tab into the new group (`PaneLayout::split_with_view`; the only tab of a group cannot split its own group). During a drag of an editor tab only, each group body is covered by five transparent `mouse_area` zones (`Yui::with_tab_drop_layer`) whose enter/exit set `Yui::tab_drop_target` (group and `DropZone`); where the drop would change the layout, the area the tab would take (the whole group, or the half on that side) is highlighted with the accent color (`ui_style::tab_drop_style`). The change happens on `TabDragEnded` (`Yui::end_tab_drag`). The body is always the same three-layer `stack` (empty `Space`s when not dragging) so that the viewport and editor widgets keep their state when a drag starts. When the tree changes, the `pane_grid` is rebuilt (`Yui::begin_layout_change` / `end_layout_change`) without losing the sizes the user dragged: the current split ratios are read from the grid (`menu_bar::grid_split_ratios`), written into the tree, and applied to every split of the new configuration that separates the same panes (`menu_bar::with_split_ratios`; in splits that involve a dock, all editor groups count as one, so the dock borders keep their size when the editor is split; `menu_bar::split_key`). The same works between the docks (Left / Right / Bottom) and the editor groups, in both directions: any view can be placed in any pane (`move_view_between` accepts any two panes). A dock body gets only the middle drop zone (a dock is never split); a dock tab dropped on an edge of an editor group splits that group. Every pane shows its tab bar, even with a single tab, so that every tab can be dragged. A dock left without tabs stays and shows the hint "Drag a tab here."; only editor groups are removed when empty. With the setting `ui.hide_empty_docks: true` (§8.6; read at startup into `Yui.hide_empty_docks`), a shown dock left without tabs is hidden instead when a layout change ends (a tab drag or closing a file; `Yui::end_layout_change`), and its View menu check is cleared; showing it again from View brings back the empty dock with the hint. The other borders keep their sizes. A document placed in a dock still counts as the selected document (`active_document` looks at the groups first, then the docks) and is not moved by View → "Split Editor Right" (it moves only the documents in editor groups). Views keep their state in the app (the terminal connection, logs, trees), so moving them keeps it; widget-local state such as a scroll position may reset. The dock titles and the View menu names still describe each dock's default content. A group that a tab bar move emptied during the drag shows the "No file open" hint (title "Editor") until the drag ends, and is removed then. Moving a viewport tab re-creates its widget, so its widget state is reset, but the camera is kept: the app owns it (`Yui::camera_of`), and a new widget adopts the app's camera (its `synced` is `None`); a fit runs only when the app asked for one (`fit_pending`). Turning the split off moves the tabs left in the right group (for example the 3D Viewport) to the end of the first group, after removing the second viewport and moving the documents.
+
+**Open text files as tabs.** Each open text file is a `Document` (`frontend/src/text_editor_pane.rs`: `DocumentId`, content, path, file name, unsaved flag) held by the app's `DocumentStore`, and appears as one tab `ViewId::Document(id)` in the same tab row as the 3D Viewport, e.g. `3D Viewport | a.yaml* | b.txt ×` (VSCode style; there is no second row of tabs inside the editor). The tab shows the file name, with `*` while unsaved, and a `×` button; the 3D Viewport tab has no `×` and cannot be closed. The tab row is always shown (see Moving tabs between editor groups). New tabs are added at the end of the Center pane, or of the right pane while split, and are selected; opening a path that is already open selects its existing tab instead of creating another (its unsaved content is not reloaded; files without a path, as in the browser, are never de-duplicated). Files are opened from the Project tab ("Text Editor"), File → "Open Text File..." (dialog), or File → "New Text File" (`Untitled-1`, `Untitled-2`, ...; numbers are not reused). Each document's toolbar has Save and Save As, and Ctrl+S (Cmd+S on macOS) saves the selected tab: while the editor has focus it is handled as a text-editor key binding (so that Cmd+S on macOS is not typed as a character), otherwise by an app-wide keyboard subscription that ignores events another widget already captured. Only edits mark a document unsaved (cursor moves and selections do not). Results and errors (opened, saved, failed) are shown in the status bar (§8.1). Closing an unsaved tab opens a confirmation (Save / Don't Save / Cancel): Save closes only after the save succeeded (cancelling the save dialog or a write error keeps the tab open), Don't Save discards, Cancel keeps it; after closing, the neighbouring tab is selected. Quitting (File → Quit, or the window's close button — the window no longer closes by itself: `exit_on_close_request(false)`, and `window::close_requests()` is turned into `Message::QuitRequested`) with unsaved files opens a confirmation listing their names (first 8, then "…and N more"): *Save All* (just *Save* for one file) saves them in the order they were opened — a file without a path opens its Save As dialog — and quits only after every file was saved; if a save is cancelled or fails, quitting is cancelled and the files stay open and unsaved; *Don't Save* quits; *Cancel* stays. Without unsaved files it quits immediately. In the browser build there is no Quit, and closing the tab is not intercepted. Open documents are per user: they are not written to the workspace YAML, not shared over collaboration, and not restored on the next start.
+
+**Splitting the editor to the right of the viewport.** View → "Split Editor Right" is checked while the editor has more than one group (`pane_view::is_editor_split`). With one group, it splits that group to the right: the new group (`PaneKind::CENTER_RIGHT` when it gets number 1) holds the second 3D viewport and all document tabs (the selected document stays selected). When checked, it merges every group into the first one: the second viewport tab is removed, the other groups' tabs are appended, then the document tabs (`set_editor_split`). A split with no open file shows the second 3D viewport (see below). Whether the second viewport exists is a separate question (`pane_view::has_second_viewport`), used for its camera and fits: a split made by dragging a tab to an edge has no second viewport. The `pane_grid` configuration is rebuilt from it (`menu_bar::build_pane_configuration(show_left, show_right, show_bottom, editor_split)`, `Yui::rebuild_pane_grid`) whenever the pane visibility or `pane_views` (File → New, opening a workspace) changes, which resets the pane sizes; a change of the editor groups (the split menu, a tab drop, closing a file) keeps them (see Moving tabs between editor groups). The document content lives in the `DocumentStore`, independent of where its tab is docked, so toggling never loses it. The 3D Viewport starts in `Center`; the right side also holds the second 3D viewport as its first tab (see below).
+
+**Second viewport and camera link.** While split, the right pane's first tab is `ViewId::Viewport2` ("3D Viewport 2"), followed by the document tabs. It is added by `set_editor_split(true)` (the selected document stays selected; with no document the second viewport is shown), removed when the split is turned off, and, when a layout is loaded, `normalize_pane_views` removes it if the layout is not split, drops duplicates of either viewport (a viewport the user moved to another group stays there), and adds it only to an empty `center_right` group when it is nowhere (a split saved before the second viewport existed); then it removes the groups left without tabs. Like the first viewport it cannot be closed. Both viewports draw the same structure, representations and displayed model; only the camera differs, and the displayed content is rebuilt per viewport on every draw (a known cost that doubles with two viewports).
+- **Where the cameras live.** The first viewport's camera is `AppState.camera`; the second's is `Yui.secondary_camera`, which is local to this screen (not saved, not sent over collaboration) and starts as a copy of the first viewport's camera the first time the second viewport is shown (`None` until then; reset to `None` when a structure is opened, File → New or Reset Camera runs while unsplit, so it is copied again). The viewport widget (`viewport::ViewportProgram`) receives its camera from the app (`Yui::camera_of`) and reports every change as `Message::ViewportCameraChanged { id, camera, fitted }` (drag, wheel, or the result of a fit). Because several mouse events can arrive before the app has rebuilt the view, the widget keeps a working copy in its state plus the last camera it exchanged with the app (`ViewportState::synced`): if the app's camera differs from `synced`, it changed from outside (collaboration delta, the backend's initial state, a loaded workspace, the link below) and is adopted; otherwise the working copy is used (`viewport::effective_camera`).
+- **Fit requests.** `Yui::request_camera_fit` bumps `camera_fit_token` and marks the viewports that need a fit in `Yui.fit_pending` (the second only while split). A viewport with a pending fit computes the fitted camera itself (it knows its own aspect ratio), draws with it at once, and reports it once per token with `fitted: true`; the app then clears that viewport's pending flag. Fitting is therefore done per viewport, and the link does not propagate a fit. Because the pending flag lives in the app, a viewport that is not currently shown (its tab is not selected) is fitted when it is next shown, and one that was fitted keeps its camera when re-created.
+- **Link.** View → "Link Viewport Cameras" (off by default). Turning it on copies the first camera to the second; while on, a camera change made by dragging or scrolling in either viewport is copied to the other one.
+- **Loading.** Opening a workspace or receiving the backend's initial state applies `Yui::apply_loaded_camera`: a default camera is fitted, a camera the user moved (saved in the workspace) is kept as is.
+- **Not sent over collaboration.** Camera changes made by dragging are not sent as deltas (they would flood the connection); a delta that arrives and sets `camera` is applied to the first viewport.
+
+**Persistence and compatibility.** The split is part of `pane_views`, so it is saved in the workspace YAML (`center_right` key, an empty list if no file is open) and restored on open; a YAML without `center_right` opens unsplit. Document tabs are removed before saving (`pane_view::pane_views_for_saving`) and again when loading (`pane_view::normalize_pane_views`), which also drops the single `text_editor` tab that workspaces saved by `2026.10.2` or earlier contain (the `ViewId::LegacyTextEditor` variant exists only so that such files still parse; a split saved by those versions stays split, with the second viewport). Whenever the layout is replaced (File → New, opening a workspace), `Yui::set_pane_views` re-attaches the tabs of the files that are open — to the right side if the new layout is split — and re-selects the previously selected one, so opening a workspace never closes the user's files.
+
+**Editor font.** The editor and the terminal share one monospace font specification (`frontend/src/fonts.rs`: family name, bold/regular, size 14 px), so that it can later be changed from a per-user settings file. JetBrains Mono (SIL OFL 1.1; Regular 270 KB and Bold 274 KB, `frontend/assets/JetBrainsMono-*.ttf` with `JetBrainsMono-OFL.txt`) is bundled and registered at startup; it is required in the browser build, where OS fonts are unavailable. It has no Japanese glyphs, so Japanese text falls back to the bundled Noto Sans JP (proportional, so Japanese is not column-aligned in the terminal).
+
+Dragging a tab out of one pane into another, or creating new splits at runtime by dragging, is explicitly out of scope until a later phase — it is additive on top of this foundation and does not require revisiting views built against it.
+
+**Status bar.** A one-line bar spans the full width at the bottom of the window, below the `pane_grid` (`frontend/src/status_bar.rs`, height `STATUS_BAR_HEIGHT` = 24 px). The left side shows the latest result message of a user operation. Each message is a `StatusMessage { text, level }`, and the level (`Info` / `Warning` / `Error`) is set explicitly where the message is written — it is never inferred from the text. Warnings are drawn in yellow and errors in red. Messages are not cleared automatically; a message stays until the next one replaces it. The right side shows, from left to right: `Generating surface...` while a surface mesh generation is in flight (cleared when the latest generation's result is applied, or when no surface remains), the atom and bond counts of the loaded structure (hidden when no structure is loaded), the displayed model with its position (`model_2 (2/20)`, or `All models (20)`; shown only for multi-model structures), and the collaboration connection state (`Local` / `Connecting...` / `Online` / `Offline: <error>`, decided by the same rule as the window title). The displayed fields are computed by the pure function `build_status_bar_fields`, and the bar's colors are constants in the same module until a UI palette (theme) is introduced. The text editor pane keeps its own status line in its toolbar.
+
+### 8.2 Menu Bar (Phase 6d-i)
+A menu bar covering **File**, **View**, and **Help** is provided.
+- **File:** New (reset to a default empty `AppState`), Open (import a YAML state file, §2.1), Save / Save As (export to YAML), New Text File / Open Text File... (open text files as tabs, §8.1), Export Structure... (export loaded structure to PDB or mmCIF via asynchronous save dialog; format determined by file extension, disabled when no structure is loaded, runs asynchronously via `Task` without blocking UI, downloads via browser mechanism on WASM), Quit. **File I/O note:** Open / Save / Save As / Export Structure use asynchronous file selection dialogs (`rfd::AsyncFileDialog` in `frontend/src/workspace_file_io.rs`) on both native and WASM platforms. On native, Open and Save As record the chosen file path, and Save overwrites the previously opened/saved path directly without prompting (falling back to Save As if no path is recorded). On WASM, due to browser security constraints without direct filesystem path access, Save falls back to Save As (file download dialog), and Open/Save/Export operations run asynchronously via browser upload/download dialogs without blocking the UI.
+- **View:** Reset Camera (fits the camera of every shown viewport to the displayed structure, or restores the default camera when nothing is loaded; §4.3), Show/Hide the Left/Right/Bottom panes, Split Editor Right (§8.1; also shows the second 3D viewport), Link Viewport Cameras (§8.1).
+- **Help:** About (shows the CalVer version from `Cargo.toml` and the GPLv3 license).
+- **Implementation:** Since `frontend` targets both native and WASM/browser builds (Chapter 6c) and browsers have no OS-level menu bar, the menu bar is rendered as an in-window `iced` widget rather than a native OS menu, so the same implementation works unmodified on both targets. Rather than introducing heavy external dependencies with version-mismatch risks, it is built directly using `iced` core primitives (`row`, `column`, `container`, `button`, `mouse_area`, and `stack`) in `frontend/src/menu_bar.rs`. Dropdowns render over the main view on an interactive stack layer with transparent mouse-area backdrops that dismiss the menu on outside clicks. Dynamic pane visibility is handled by `build_pane_configuration(show_left, show_right, show_bottom)`, and camera resets trigger via monotonic `camera_reset_token` updates.
+- **Style (shared with the context menus, §8.3):** All menus take their look from `frontend/src/ui_style.rs`. Colors are not written in the menu code; they come from `UiPalette`, a struct of color roles (card background / border / shadow, text, muted text, disabled text, item hover and active backgrounds, accent, separator, menu-bar background, danger, modal scrim). Only the dark palette (`UiPalette::dark()`) exists; switching themes is a later task. The shared style functions are `menu_card_style` (card background, border, shadow), `item_button_style` (transparent normally, a lighter background on hover, dim text when disabled, no filled accent color), `danger_button_style`, `accent_button_style` (OK), `menu_bar_button_style`, `menu_bar_style`, and `menu_separator` (a 1 px line, not dashes). The menu bar has no app-name label (the name stays in the window title and the About dialog); the open menu is shown by the button's background, not by brackets. The three buttons have a fixed width (`MENU_BUTTON_WIDTH`), so each dropdown's left edge is computed from the button's index (`dropdown_left`) and sits directly under its button. The About dialog uses the card style over a dimmed (scrim) background.
+- **Deferred (explicit gap):** An **Edit** menu (Undo/Redo) is not part of the initial menu bar — it requires an `AppState` change-history design that doesn't exist yet. Do not add non-functional Undo/Redo menu items as placeholders; add the Edit menu once that history mechanism is designed.
+
+### 8.3 Context Menus / Right-Click (Phase 6d-ii through 6d-iv)
+Right-click context menus are added progressively, gated by whether the target pane already has a real interactive widget backing it (not just placeholder text):
+- **3D Viewport / Center pane (Phase 6d-ii):** Right-clicking performs a ray-cast pick against the currently loaded structure. Screen coordinates are mapped to a world ray via `screen_to_world_ray` (using LookAt basis vectors and camera FOV without full matrix inversion). The ray is queried against the spatial acceleration index via `AtomBvh::query_ray`, which performs Slab-method bounding box pruning with atom radius margins and exact sphere ray-intersection to find the nearest atom under the cursor. Hit results trigger an interactive in-window context menu card (`frontend/src/context_menu.rs`) rendered on the top stack layer with a full-screen transparent `mouse_area` backdrop that dismisses on outside clicks. Per §8.4, menu actions strictly map to `Selector` and `Representation` mutations (Hide Atom via `visible: false`, Show As via `RepresentationKind`, Color By via `ColorScheme`) without introducing custom commands. Select Atom / Select Residue do not add a Representation: they change the per-user selection state (§8.9).
+- **Left pane / structure tree (Phase 6d-iii)** and **Right pane / Representation list (Phase 6d-iv):** As of Phase 6c, both panes are placeholder text, not interactive widgets — there is nothing meaningful for a context menu to act on yet. Each phase must first build the pane into a real tree/list widget before adding its context menu; see `ROADMAP.md`.
+
+**Keeping menus inside the window.** The window size is kept in `Yui.window_size`: the size at startup is read with `window::latest()` + `window::size`, and later changes arrive as `window::Event::Resized` (and `Opened`) through a subscription (`Message::WindowResized`). Every menu (the dropdowns and the three right-click menus) is built by one function, `menu::popup_menu`, which decides its place with the pure functions in `frontend/src/menu/placement.rs`:
+- The area is the window minus the menu bar and the status bar (`layer_area`).
+- A right-click menu opens with its top-left corner at the cursor. If it does not fit on the right, it opens to the left of the cursor; if it does not fit below, it opens above the cursor; if neither side has room, it is shifted until it fits (`place_at_cursor`, with an 8 px margin).
+- A dropdown opens directly under its button; only its height is limited (`place_dropdown`).
+- If the content is taller than the area, the menu's height is limited to the area and the content becomes a `scrollable`. The scrollable is used only in that case, so a menu that fits looks as before.
+- iced cannot give the real height of a widget before drawing, so the height is estimated from the menu model: text height = font size × 1.3 (the default line height), a button adds its vertical padding, plus the surface's item spacing and padding. A right-click card has a fixed width (240 / 270 px) so that the horizontal fit can be computed too. If the estimate is a little off, the margin and the scrolling absorb it. The cursor position is used as it is, in the coordinates of the layer the menu is drawn on (as before).
+
+### 8.4 Action Pipeline (unifying Menu / Context Menu / Mouse / Python API)
+Menu bar actions, context menu selections, direct mouse manipulation, and the Python console (§6.1) all resolve to the same underlying `Selector` / `Representation` / `AppState` operations (§6.2) — none of them introduce a separate command language, consistent with the no-new-DSL rule of §6.2. A menu item or context menu action is implemented as a call into the same Python-API-equivalent Rust functions the scripting layer uses, so the resulting operation history can always be reproduced, saved, and exported as a script regardless of which input method triggered it.
+
+### 8.5 CJK/IME Support
+`iced`'s `cosmic-text`-based text shaping is used to ensure stable Japanese input and display.
+
+### 8.6 Per-User Settings File
+Settings that belong to the person using the app — not to a project — live in a small per-user YAML file, separate from the workspace document (§2.4): they are not saved in a workspace, not shared over collaboration, and not part of `AppState`. Implemented in `frontend/src/user_settings.rs`.
+
+- **Location:** native — the OS user config folder + `yui/settings.yaml` (`dirs::config_dir()`: `~/.config/yui/settings.yaml` on Linux, `~/Library/Application Support/yui/settings.yaml` on macOS, `%APPDATA%\yui\settings.yaml` on Windows); if the OS config folder cannot be determined, no file is used and the defaults apply. Browser — `localStorage`, key `yui.settings`, holding the same YAML text. File → "Open Settings File" (native only) opens the file as a text tab, first creating it with an all-comment template (`DEFAULT_SETTINGS_TEMPLATE`) and its folders if it does not exist; an existing file is never overwritten.
+- **When it is read:** once at startup (`main`, before the window is created). Changing it requires restarting YUI; there is no live reload. The app writes back only the settings chosen in the View menu — the theme (§8.8) and the selection highlight (§8.9) —; it rewrites just the `theme:` line and keeps comments and all other keys.
+- **Items (currently):**
+  ```yaml
+  theme: dark                       # "dark" (default) or "light" (§8.8)
+  selection_highlight: glow         # "glow" (default), "halo" or "off" (§8.9)
+  editor:
+    font_family: "JetBrains Mono"   # default: the bundled monospace font
+    font_size: 14                   # pixels, 6 - 72; default 14
+    scrollbar: true                 # scrollbar next to the text editor; true (default) or false
+  terminal:
+    font_size: 12                   # pixels, 6 - 72; default 12 (the family is editor.font_family)
+  ui:                               # look of the menus and the tabs (§8.8)
+    tab_style: underline            # "underline" (default: an accent line under the selected tab) or "filled"
+    tab_font_size: 12               # pixels, 8 - 24; default 12
+    corner_radius: 8                # menus and dialogs, pixels, 0 - 16; default 8 (items use half of it)
+    hide_empty_docks: false         # true: hide a side / bottom panel left without tabs (§8.1); default false
+    colors: {accent: "#5b8def"}     # color overrides, "#rrggbb" or "#rrggbbaa", for both themes
+    dark_colors: {}                 # the same, only for the dark theme
+    light_colors: {}                # the same, only for the light theme
+  render:                           # drawing sizes (§4.3); radii in angstroms
+    ball_scale: 0.35                # Ball & Stick sphere = this x the van der Waals radius, 0.1 - 1.0
+    stick_radius: 0.12              # Ball & Stick stick, 0.02 - 0.5
+    licorice_radius: 0.2            # Licorice stick, 0.05 - 0.6
+    line_radius: 0.04               # Line, 0.01 - 0.2
+    interaction_radius: 0.08        # interaction lines, 3D and SVG, 0.02 - 0.3
+    interaction_dash: 0.35          # dash length of the interaction lines (Å), 0.05 - 2.0
+    interaction_gap: 0.25           # gap between dashes (Å; 0 = solid), 0 - 2.0
+    bond_color: [0.7, 0.7, 0.7]     # Ball & Stick stick color, RGB, each 0 - 1
+    ribbon_helix_width: 2.6         # cartoon helix ribbon width (Å), 0.4 - 6.0
+    ribbon_helix_thickness: 0.7     # helix ribbon thickness (Å), 0.1 - 2.0
+    ribbon_sheet_width: 2.4         # sheet arrow width (Å), 0.4 - 6.0
+    ribbon_sheet_thickness: 0.3     # sheet thickness (Å), 0.1 - 2.0
+    ribbon_loop_radius: 0.25        # loop tube radius (Å), 0.05 - 1.0
+    selection_size: 1.0             # size factor of the selection glow / halo, 0.5 - 3.0
+    ssao_strength: 0.0              # ambient occlusion (SSAO), 0 = off, 0 - 1 (§4.7)
+    ssao_radius: 3.0                # SSAO search radius (Å), 0.3 - 10
+    surface_grid_spacing: 0.5       # molecular surface grid spacing (Å), 0.25 - 1.5
+    surface_probe_radius: 0.0       # molecular surface probe radius (Å), 0 - 3.0
+  ```
+  The `render:` values are `RenderSettings` (`frontend/src/user_settings.rs`), read through `user_settings::startup_render()` by `viewport/scene.rs` (`AtomStyle`), the interaction lines and the SVG export; the constants in `scene.rs` are the defaults. They are checked one by one like the other items (a wrong type or an out-of-range value gives that item's default and a warning). The dash lengths reach the interaction shader through the camera uniform buffer (`CameraUniforms::style`, which also carries `selection_size` to the selection shader; the SVG export keeps its own dash pattern that follows the line width), the surface items are the `grid_spacing` and `probe_radius` of every `SurfaceParams` the app builds (a finer spacing costs time and memory in proportion to its cube).
+  `editor.font_family` applies to the text editor and the terminal (bold text uses the bold face of the same family); `editor.font_size` applies to the text editor only; the terminal's size is `terminal.font_size` (default 12 px, `fonts::TERMINAL_FONT_SIZE`; read at start-up like the others), and its row/column count, the selection and the wheel scrolling are computed from it (cell width 0.6 x size, row height 1.3 x size + 1). `font_family` may be the bundled family names (`JetBrains Mono`, `Noto Sans JP`; case-insensitive) or, in the native build, the family name of any font installed on the computer, checked against the system font database (`fontdb`; a name is matched against family names, not file names). In the browser only the bundled fonts exist. There is no setting for a font *file* path. The chosen family name is leaked once at startup (`fonts::init`) because `iced` font names are `&'static str`. `editor.scrollbar` (read once at startup) shows a draggable scrollbar next to the text editor: `iced`'s `text_editor` has no scrollbar and does not expose its scroll position, so the editor is given the height of its content and wrapped in a `scrollable` (`text_editor_pane::view_document`); because the editor then no longer scrolls to the cursor by itself, the cursor row is estimated from the character widths (wrapped lines), calibrated to the measured content height, and `scroll_to` is issued after keyboard moves and edits (not after mouse clicks). With `scrollbar: false` the plain editor with its internal scrolling is used.
+- **Validation (never stops the app):** a missing file means all defaults, silently. Text that is not valid YAML, or whose top level is not a mapping, gives all defaults and one warning naming the file. Otherwise each item is checked on its own: a wrong type, a `font_size` outside 6 - 72 (including NaN/infinity), or a font family that is not installed falls back to the default **for that item only** (an unknown font falls back to JetBrains Mono, not to an arbitrary system font) and adds a warning; the other items still apply. Unknown keys are ignored without a warning, so newer settings keys do not break older versions. Warnings from startup are joined into one status-bar warning when the app starts (§8.1).
+
+### 8.7 Menu Model and Commands
+The menus are built at run time from data, not written as buttons in code, so that a future plugin can add items. (The plugin mechanism itself — language, loading, permissions — is out of scope here and will be designed separately.) The code is in `frontend/src/menu/` (`frontend` and not `core`, because the model carries UI-facing details such as button sizes and the app's `Message` type).
+- **Commands.** A menu item does not hold the action itself but a `CommandInvocation { id, args }`: a command identifier (`file.new`, `file.export_structure`, `view.toggle_pane`, `viewport.show_as`, ...) and serializable arguments (a JSON value: a pane, a representation kind, a color scheme, an atom ID, a row index). `CommandRegistry` maps an identifier and arguments to the existing action — the app `Message` that carries a `MenuAction`, `ContextMenuAction`, `TreeContextMenuAction` or `RepContextMenuAction` — and the existing `handle_*` functions run it unchanged. Clicking an item sends `Message::RunCommand`, which resolves it and handles the resulting message. An unknown identifier or malformed arguments never panic: nothing is executed, a warning is printed and shown in the status bar. The built-in commands, their arguments and what they map to are listed in the documentation comment of `menu::register_menu_commands`. The target of a right-click menu (an atom, a tree node, a representation row) is part of the arguments (`atom_id`, `chain_id`/`residue_id`, `index`); the tree menu's target is the node the app remembered when the menu was opened (`Yui.tree_context_menu`), so its commands take no node argument.
+- **Menu model.** `MenuItem` is a command (`CommandItem`: label, command, enabled, checked, style), a separator, a heading, a card header (title and a description of the target), a group (laid out as a row or column) or a submenu (drawn for now as a heading followed by its items; its look is decided by the menu-styling task). Whether an item is enabled or checked is computed by the code that produces the items from the app's state (`MenuContext`: pane visibility, split, camera link, whether a structure is loaded, and the right-click target); there is no condition language. A checked item is drawn with `✓ ` (unchecked: two spaces) before its label. The per-item `ItemStyle` (text size, padding, full width, danger color) reproduces the existing look; `menu::render_items` draws the model for the dropdown (`Surface::Dropdown`) and the right-click cards (`Surface::Card`).
+- **Locations and the contribution point.** Menus are identified by a location: `menu/file`, `menu/view`, `menu/help`, `context/viewport`, `context/structure_tree`, `context/representation`, `context/file` (right-click "Open with" on a file of the Project tree; it opens next to the mouse and lists the handlers of the file, command `file.open_with` with `path` and `handler`). `MenuRegistry::contribute(location, order, producer)` adds items (`contribute_item` for a fixed item); the built-in menus are registered through the same call (`menu::register_builtin_menus`), so a plugin uses exactly the same entry. The items of a location are ordered by `order` (smaller first), then by registration order. Built-in items use multiples of 100 (File: 100 file operations, 200 text files, 300 Quit; View: 100 Reset Camera, 200 background, 300 panes and toggles), so a plugin can insert between them (e.g. 150) or append (e.g. 1000).
+- **Relation to §8.4 and §6.2.** Command identifiers are names for existing operations, not a new language: there is no parser or evaluator for strings, and the commands still reduce to the same `Selector` / `Representation` / `AppState` operations as before. Arguments are plain data so that a Python console or a plugin can later invoke the same commands.
+
+---
+
+### 8.8 UI Theme (Dark / Light)
+The UI has two themes, **dark** (default; the look before themes existed) and **light**. The theme is a per-user setting (§8.6): it is not part of the workspace, `AppState` or collaboration.
+- **Palette (`frontend/src/ui_style.rs`):** UI colors are not written in widget code; they come from `UiPalette`, a struct of color *roles* (card background / border / shadow, five text tones `text` > `text_value` > `text_secondary` > `text_muted`/`text_subtle` > `text_faint`, disabled text, item hover / active backgrounds, accent, separator, menu-bar and status-bar backgrounds, selection and chip backgrounds, danger / warning / error / online colors, panels, banner, scrim, terminal background / foreground / cursor). `UiPalette::dark()` and `UiPalette::light()` give the values; `UiPalette::for_theme(ThemeKind)` selects one. Style functions call `ui_style::palette()`, which reads the current theme (an atomic set at the start of `Yui::view`), so the palette does not have to be passed through every view function. Similar grays in the old hard-coded colors were merged into the five text tones, so the dark theme can differ from the old look by a few percent in some gray texts. **Flat look and customization:** the tab bar (`pane_view::view_tab_bar`) is flat: a muted label for unselected tabs, a stronger one for the selected tab with a 2 px accent line under it (`tab_style: underline`; `filled` paints the selected tab instead), a soft hover background, and a thin separator under the tab bar and under the menu bar. The pane title bars are small muted text on the menu-bar color and each pane has a thin separator-colored border (`pane_title_style`, `pane_body_style`). The iced theme of the standard widgets (`ThemeKind::iced_theme`) is the built-in dark / light one with only its `primary` color replaced by the palette `accent`, so the default buttons, the focus of text inputs and the pane-resize highlight follow `ui.colors.accent` too. The line is the bottom padding of an outer container whose background is the accent, around an inner container painted with the bar color: a `Fill`-width line would make every tab take a whole row when the tabs wrap. Tabs that do not fit wrap to the next row in the docks (Left / Right / Bottom, often narrow), and scroll horizontally in an editor group, as in VSCode (trackpad, Shift + wheel, or the plain wheel, which `TabBarWheel` turns into a horizontal `scroll_by`). A tab is reordered by dragging it inside its pane: pressing a tab (a `mouse_area` inside the button, which reports only releases) selects it and starts the drag (`Yui::tab_drag`), entering another tab of the same pane moves the dragged tab to that tab's place (`PaneViewState::move_view_to`, keeping the selected view), and releasing the button anywhere (a subscription that exists only while dragging) ends it. A click never enters another tab, so it cannot reorder. While dragging, once the pointer has moved 4 px from the press (`Yui::tab_drag_start`), a small box with the tab's name follows the pointer, as in VSCode (`Yui::view_tab_drag_ghost`, an `iced::widget::pin` in a top layer over the whole window, opaque card color with an accent border: `ui_style::tab_drag_ghost_style`). It is placed 12 px right and 10 px below the pointer, never under it, so the tab bars and drop zones below still receive the pointer. The palette has the tab roles `tab_bar_bg`, `tab_indicator`, `tab_active_text`, `tab_inactive_text`, `tab_active_bg`, `tab_hover_bg`. The settings file section `ui:` (§8.6) changes `tab_style`, `tab_font_size`, `corner_radius` (`UiSettings`, set once at startup with `ui_style::set_ui_settings`) and overrides the colors named in `ui_style::COLOR_NAMES` (`UiPalette::set_color`, applied by `ui_style::palette()` on top of the theme: `colors`, then `dark_colors` / `light_colors`); a wrong value keeps the default and shows a warning in the status bar.
+- **iced's own theme:** `Yui::theme` returns `Theme::Dark` or `Theme::Light` (`ThemeKind::iced_theme`), so standard widgets (text input, scrollbars, text editor) match. Before this, no theme was set and iced followed the operating system's color scheme; now the choice is explicit.
+- **Kept separate from the theme:** the 3D viewport background color (`AppState.scene.background_color`, View → Background Color) does not change when the theme changes; neither do the colors used to draw molecules (atoms, chains, secondary structure, interactions, surfaces) and the terminal's ANSI color table (terminal data). The terminal's own background / foreground / cursor are in the palette, but the light palette keeps them dark, because programs in the terminal assume a dark background for their ANSI colors.
+- **Switching and saving:** View → Theme: Dark / Light (command `view.set_theme`, argument `theme`; the current one is checked). The change applies immediately and is written to the per-user settings as `theme: dark|light`: native — the `theme:` line of `settings.yaml` (created from the template if missing; comments and other keys are kept; `set_theme_in_text`), browser — the `localStorage` text. A failed write does not stop the app: the theme still changes and the status bar shows a warning. At startup the `theme` key is read like other settings (§8.6); a value other than `dark` / `light` falls back to dark with a warning.
+- **Not covered:** the 3D rendering colors above; automatic following of the OS color scheme; custom palettes.
+
+### 8.9 Selection (per user)
+"Which atoms are selected" is a state of its own, separate from Representations: `Yui.selection` (`BTreeSet<u32>` of atom ids; operations in `frontend/src/app/selection_ops.rs`, pure rules in `frontend/src/selection.rs`). **It is per user: it is not part of `AppState`, the workspace YAML or collaboration** (an automated test checks that selecting does not change the YAML or `AppState`). To keep a selection, save it as a named selection (View → "Save Selection as Named Selection", command `selection.save_as_named`), which is part of the workspace as before. Loading a structure, a workspace or File → New drops the selection.
+- **Left click:** pressing and releasing the left button within `CLICK_MAX_DISTANCE` = 4 px is a click; a larger move is a camera drag (rotation). While the pointer stays within 4 px of the press point, the camera does not move, so the click picks the atom that was under the pointer. The click picks with the same ray cast as the right click (`ViewportProgram::pick_atom`) and is sent to the app as `Message::ViewportClicked`. Clicking where there is no atom clears the selection.
+- **Left drag:** the drag moves the camera according to the modifier keys held (`viewport::camera::DragMode::from_modifiers`, read on every move, so the keys can change during the drag): no modifier — orbit around the target (`orbit_camera`); Shift — pan, i.e. move the eye and the target together in the screen plane (`pan_camera`: one pixel moves the molecule by `2 · distance · tan(fov/2) / viewport height` Å at the target's distance, so the molecule follows the pointer at any zoom and the direction and distance do not change); Ctrl (Cmd on macOS) — zoom by the vertical movement (`drag_zoom_factor`: dragging down zooms out, up zooms in; the distance limits of the wheel apply). Shift wins if both are held. On macOS Ctrl+click is the system's right click, which is why Cmd is used there. A modifier+click (no drag) is still a selection (add / toggle, §8.9). The wheel still zooms.
+- **Modifier keys:** none = replace; Shift = add; Ctrl (Cmd on macOS) = toggle (remove if already selected; if both keys, toggle). A click on empty space with Shift or Ctrl keeps the selection.
+- **Unit:** a click selects an atom; a **double click** (second click within 400 ms and 6 px) selects the whole residue (same chain and residue number) of the clicked atom. The unit is not a menu setting.
+- **Clearing:** the Esc key (unless a text widget used it), or View → Clear Selection (command `selection.clear`).
+- **Other routes:** the right-click menu's Select Atom / Select Residue and clicking a node in the structure tree (and its Select menu item) now set this selection (replace) instead of adding a yellow Representation. Workspaces saved earlier that contain `sel_atom_…` / `sel_res_…` / `tree_sel_…` Representations load them as ordinary Representations; they are not removed.
+- **Highlight setting:** View → Selection Highlight: Glow (default) / Halo / Off (command `view.set_selection_highlight`, argument `style`; the current one is checked). The choice is a per-user setting saved like the theme (§8.6, §8.8): the top-level key `selection_highlight: glow|halo|off` of `settings.yaml` (native; the line is rewritten, comments and other keys are kept) or `localStorage` (browser). An invalid value falls back to glow with a warning. How the highlight is drawn: §4.10.
+
+### 8.10 Playback (per user)
+A time-driven way to step through "frames". It lives in `frontend/src/playback.rs` (pure rules and the clock) and `frontend/src/app/playback_ops.rs` (binding frames to the displayed model); the control bar is `frontend/src/playback_bar.rs`. **Playback is per user: it is held in `Yui.playback` and is not part of `AppState`, the workspace YAML or collaboration** (`AppState.trajectory` is untouched; it is reserved for trajectory files).
+- **Frames.** The playback core only knows "the number of frames" and "the current frame"; it does not know what a frame is. A frame is a model of a multi-model structure (`model_1`, `model_2`, … in the order of `model_atom_ranges`), shown by setting `AppState.active_model`; or, when a trajectory is open (§4.2), a frame of the trajectory, shown by replacing the atom coordinates. `Yui::frame_count`, `current_frame` and `show_frame` are the one place that binds frames to what is shown, so a trajectory could be added there (done in §4.2).
+- **Clock.** While playing, `iced::time::every` (native and WASM) delivers `Message::PlaybackTick` at half a frame's length (16 ms at the fastest). When paused there is no subscription, so nothing wakes up or redraws (`Playback::tick_interval` is `None`). The number of frames to advance is computed from the elapsed time and the speed (`Playback::steps_due`, 1–30 fps, default 5, the fraction is carried over), not from the number of ticks: if drawing is late, playback does not slow down; it skips frames to catch up (capped at 1000 per tick).
+- **Loop modes.** `step` / `advance` (pure): *Once* stops at the last frame (the surface is then rebuilt), *Repeat* returns to the first frame, *Ping-pong* reverses without showing an end frame twice. Starting from "All models" begins at the first model; starting at the end in *Once* restarts from the first.
+- **Controls.** Shown only when there are two or more frames, below the 3D Viewport tab: first / previous / Play-Pause / next / last, a frame slider, the frame name and number, the speed (1–30 fps) and the loop mode (a button that cycles). The same operations are commands in the command registry (`playback.play_pause`, `playback.first`, `playback.prev`, `playback.next`, `playback.last`, `playback.set_loop`) and appear under View → Playback (enabled only with two or more frames). Keys: Space = Play / Pause, ← / → = one frame back / forward; they act only when no widget (a text field, the editor, the terminal) handled the key.
+- **Status bar.** The right-hand field of the displayed model shows `model_3 (3/20)`, prefixed with `Playing` while playing. No `StatusMessage` is produced per frame while playing; a manual model switch still shows its message.
+- **Manual changes.** Choosing a model in the Structure tree while playing stops playback and shows that model. Opening a structure or workspace, or File → New, stops playback (`update_model_atom_ranges` resets it). The first/previous/next/last buttons and the slider keep playing if playing.
+- **Selection.** Atom IDs differ between models, so **whenever the displayed model changes, the selection is cleared** (by playback, the buttons, the slider or the Structure tree). Known limitation: Representations with `Selector::AtomIds` and named selections are not touched; after the model changes they may match nothing.
+- **Surface.** While playing, and while the slider is being dragged, the molecular surface **follows with a delay** (native build). Not every frame is built: `Yui::follow_surface` starts a background build for the displayed model if none is running; if one is running it only sets `surface_follow_pending`, and when that build's result arrives (and is still the latest generation, so it is not discarded) the surface is built again for the then-displayed model. Frames in between are skipped, so the surface lags the atoms by about one build time (1HLS, 782 atoms, grid 0.5 Å: about 43 ms in a release build, measured once on the development machine; debug builds are several times slower). When playback pauses or ends, or the slider is released, it is rebuilt for the displayed model (§4.4), which also discards a stale in-flight build. Stepping with the buttons while paused rebuilds it, like a manual model switch. In the browser build, where generation is synchronous and would block the UI, the surface is still not drawn while playing or dragging (`Playback::hides_surface`). Non-covalent interaction lines are filtered by the displayed model on every frame; its cost is not measured here. Pre-building a mesh per model is out of scope.
+- **Two viewports.** Both viewports show the same `active_model`, so both follow playback; the control bar is only below the first.
+
+### 8.11 Camera Animation (per user)
+Spin, rock and smooth moves of the camera. The camera math is pure (`frontend/src/camera_anim.rs`); when to move, the timer and the stop conditions are in `frontend/src/app/camera_anim_ops.rs`. **Animations are per user: `Yui.camera_anims` (one per viewport) is not part of `AppState`, the workspace YAML or collaboration.** An animation only changes the camera through the normal route (`AppState.camera` for the first viewport, `Yui.secondary_camera` for the second, §8.1), and camera changes made on this screen are not sent over collaboration (as with dragging), so nothing is flooded.
+- **Kinds.** *Spin* turns the camera around the target, about the same axis as a horizontal mouse drag (`orbit_camera`), at a constant speed (View → "Spin"; "Spin Speed" cycles 10 / 20 / 40 / 80 deg/s, default 20). *Rock* swings ±30° around the camera at the moment it was switched on, as a sine wave with a 4 s period (View → "Rock"). *Move* goes from the current camera to another one in 0.4 s with ease-in/out (`smoothstep`). Spin and Rock replace each other; Move replaces both for that viewport.
+- **Interpolation (Move).** The camera is not interpolated component by component. `interpolate_camera` interpolates the target linearly, the distance from the target in log space (so zooming looks uniform), and the direction from the target to the eye and the up vector by spherical interpolation (`slerp`; for opposite directions it passes through a perpendicular direction). The distance therefore stays between the two end distances and the camera never cuts through the target, however far apart the two views are. The field of view is interpolated linearly; at 0 and 1 the result equals the start and the end.
+- **What moves smoothly.** View → Reset Camera and View → "Zoom to Selection". The fitted camera still comes from the viewport widget (it needs the pane's aspect ratio, §8.1): when its result arrives and the request was Reset Camera / Zoom to Selection (`Yui.animate_fit`), the app keeps the current camera and starts a Move to the fitted one instead of switching at once. Fits for a newly opened structure, a workspace or File → New stay immediate. Zoom to Selection fits the selected atoms (`ViewportProgram::fit_selection`, `selection::positions_of`) with the same rule as the whole-structure fit (2 Å atom padding, 1.1 margin); it is disabled without a selection.
+- **Timer.** While at least one animation is running, `iced::time::every(16 ms)` delivers `Message::CameraAnimTick`; otherwise there is no subscription. The step is computed from the elapsed time (capped at 0.1 s per tick), so the speed does not depend on the tick rate. As with playback, the tick carries no time (the WASM timer returns another `Instant` type).
+- **Stops.** A mouse operation on the viewport (drag, wheel; the widget reports it as a non-fitted camera change) stops that viewport's animation, and, when the cameras are linked, the other one too. Opening a structure, File → New, loading a workspace and Reset Camera / Zoom to Selection requests stop all animations first.
+- **Two viewports.** View menu operations act on the viewport that was moved last (the first one if the split is off). With "Link Viewport Cameras" on, Spin and Rock set the same camera on both viewports; a Move to a fitted camera is per viewport (the aspect ratios differ), as with the fit itself.
+
+## 9. License & Distribution Policy
+
+- **License:** GPLv3. The dependency `ProteinDF_bridge` (and its Rust port `proteindf-bridge`) is also GPLv3, so there is no licensing conflict.
+- **Distribution formats:** In addition to native installers for macOS (dmg), Linux (deb, AppImage; rpm is not built) and Windows (an NSIS setup .exe; msi is not built, see below), the platform provides browser execution via `backend` + the WASM `frontend`.
+- Whether to bundle external modeling tools will be considered separately.
+- **Installers (done, unsigned; verified on Linux only):** built by `cargo-packager` (settings in `[package.metadata.packager]` of `frontend/Cargo.toml`: product name YUI, identifier `io.github.proteindf.yui`, icons from `packaging/icons/` (generated by `packaging/make-icons.py`: PNGs and an `.ico`; cargo-packager makes the `.icns`), binaries `yui-frontend` (main) and `yui-backend`, and a `beforePackagingCommand` that builds the release binaries; the version is the workspace version). `scripts/build-installers.sh` builds for the machine's OS. Formats: Linux `.deb` and `.AppImage`, macOS `.dmg`, Windows NSIS `setup.exe`. The CI is `.github/workflows/release-installers.yml`: **manual only** (`workflow_dispatch`; building all installers takes long, the macOS runner the most), a matrix of `ubuntu-22.04` (deb + AppImage, built on an older glibc for portability), `macos-14` (dmg, Apple Silicon only) and `windows-latest` (NSIS), uploading the files as artifacts (14 days; attach them to the GitHub release by hand). The Debian package depends on the libraries that winit and wgpu load at run time (the binary links only libc, libm and libgcc). **Not signed or notarized** (no certificates or accounts are configured): macOS and Windows warn on the first launch; signing needs an Apple Developer account and a code-signing certificate, i.e. a decision about money and secrets, and cargo-packager supports both when they exist. **No `.msi`:** WiX requires the first field of the product version to be below 256, which CalVer (`2026.10.4`) breaks and cargo-packager has no way to map it, so the Windows installer is the NSIS `.exe` (this replaces the `msi` named above); an `rpm` is not built either. Verified here: the `.deb` and the `.AppImage` build, the deb's metadata and contents (`dpkg-deb`), and that the binary extracted from the deb and the AppImage start (on a virtual screen with the software renderer); the workflow's YAML parses. **Not verified:** the macOS and Windows installers and the workflow itself (it has never run), installing the deb on a clean system, and a real GPU.
+- **Web build deployment (done, local use):** `scripts/build-web.sh` makes the release bundle (`trunk build --release`, wasm-opt; `target/web/dist`, about 14 MB, and `yui-web-<version>.zip`, about 6 MB; `--public-url` for a sub-path). `backend` serves it with `YUI_WEB_ROOT=<dist>` (`tower_http::services::ServeDir` as the router's fallback after all `/api/` routes; `/` is `index.html`, `.wasm` is `application/wasm`, anything missing is a 404, paths outside the folder are never served; the folder must contain `index.html` or the backend exits with a message). The page and its API come from one origin, so the default collab URL (§1) needs no configuration; the development server `trunk serve` forwards `/api/` and the `/api/collab` WebSocket to `127.0.0.1:8080` (`frontend/Trunk.toml`). Without a backend the same bundle runs standalone, so a plain static host also works.
+- **Remote exposure (Phase 6j done).** `backend` binds `127.0.0.1:8080` by default; `YUI_BIND` changes it only together with `YUI_BEHIND_TLS_PROXY=1` (TLS is the reverse proxy's job), and then the terminal and file endpoints stay closed unless `YUI_ENABLE_TERMINAL=1` / `YUI_ENABLE_FS=1` are set (§7.4). Every API needs a secret: the Host's random per-start secret, or an Editor / Viewer invitation (expiring, revocable; they cannot open the terminal or change the state). Failed authentications are rate limited. Not covered: user accounts / single sign-on, and per-user permissions inside a role. The static bundle itself holds no secrets and can be hosted anywhere.
+- Not done: compression of the `.wasm` for the backend's own responses (13.5 MB raw; a reverse proxy or a static host compresses it, and the zip is 6 MB), cache headers other than `ServeDir`'s defaults, signing of the installers (above).
+
+---
+
+## 10. External Dependency Project: `proteindf-bridge`
+
+Structural data I/O, format conversion, and structural preprocessing (hydrogen addition, ion pairs, SSBond, terminal capping, superposition, etc.) are managed as a separate project from this repository, as **`proteindf-bridge`** — a 1:1 Rust port of the existing Python asset `ProteinDF_bridge` (`../ProteinDF_bridge`, GPLv3).
+
+- **Multi-language support:** Centered on a Rust core library:
+  - **C/C++:** Exposes a C ABI via `cdylib` + header generation with `cbindgen`.
+  - **Python:** Bindings via `PyO3` + `maturin` (to minimize migration cost for existing `ProteinDF_bridge` users).
+  - **Rust:** Used directly as a native crate from this project's `core` (as an unconditional dependency with target-specific features: `zstd` for native, `ruzstd` for `wasm32`), and as `dev-dependencies` in `frontend` for tests. `renderer-native` does not directly depend on `proteindf-bridge` (operates through `core`).
+- **Porting scope:** Ports 1:1 the data model (`PeriodicTable`, `Vector`, `Matrix`, `Position`, `Atom`, `Bond`, `AtomGroup`), format conversion (PDB, mmCIF, MOL2, GRO, XYZ, Amber PRMTOP), and structural operations (`Select`, `AminoAcid`, `SSBond`, `IonPair`, `Neutralize`, `Modeling`, `Superposer`/`Superposer_quaternion`), and ports the existing `tests/test_*.py` as Rust tests to ensure correctness.
+- **New format support:** Formally and robustly supports **PDBx/mmCIF** as the primary go-forward format. The legacy PDB format has hard limits (e.g. 99,999 atoms, certain chain-ID representations) due to fixed column-width constraints, which is incompatible with the "up to ~1 million atoms" goal in Section 4.2. Since the existing `ProteinDF_bridge/mmcif.py` is, as its name `SimpleMmcif` suggests, a simplified implementation, `proteindf-bridge` hardens it to a level that can reliably round-trip large-scale structures (detailed specification defined in `SPEC.md` on the proteindf-bridge side).
+- **Integration of ProteinDF computation-result I/O:** In addition to structural data (from `ProteinDF_bridge`), the existing Python library **`ProteinDF_pytools`** (`orbinfo.py`, `matrix.py`/`vector.py`, `basisset.py`/`basis2.py`, `pdfparam_hdf5.py`, `poputils.py`, etc.), which handles ProteinDF computation results (`pdfparam.h5`: basis set, MO coefficient matrix, orbital energies, population analysis such as Mulliken charges, etc.), is also integrated into `proteindf-bridge`, with HDF5 reading support on the Rust side (e.g. the `hdf5-metno` crate).
+- **Cube file support needs only a parser:** Since ProteinDF's own C++ tools (`pdf-mkfld-dens`/`pdf-mkfld-mo`/`pdf-mkfld-esp`, implemented via `saveCubeData()` in `src/tools/mkfld_common.cpp`) already output standard Gaussian CUBE-format files, `proteindf-bridge` **does not need** to implement GTO-to-grid expansion for cube generation. Only a parser for reading standard Gaussian CUBE files (as input to the isosurface pipeline in Section 4.5) needs to be implemented.
+- **Handling within this repository:** This project's `core` (and `frontend` `dev-dependencies`) reference `proteindf-bridge` as a Git dependency pinned to a release tag (`tag = "2026.10.7"`, switching to crates.io in the future); `renderer-native` does not directly depend on `proteindf-bridge`. Detailed design and implementation are managed in `../ProteinDF_bridge/RUST_PORT_SPEC.md`.
+
+### 10.1 Secondary Structure Estimation (DSSP-equivalent)
+
+Since this does not exist in the current `ProteinDF_bridge`, it is newly implemented on the `proteindf-bridge` side (used for ribbon display in Section 4.3). Helix/sheet estimation is performed from backbone N-H...O=C hydrogen-bond patterns, using an algorithm similar to the original DSSP, based on the Kabsch-Sander electrostatic model (`E = q1*q2*(1/r(ON) + 1/r(CH) - 1/r(OH) - 1/r(CN)) * 332`, judged as a hydrogen bond when `E < -0.5 kcal/mol`). This backbone hydrogen-bond detection logic is shared with the hydrogen-bond detection described in Section 10.2.
+
+### 10.2 Detection of Non-Covalent Interactions (Salt Bridges, Hydrogen Bonds, CH-π, etc.)
+
+`proteindf-bridge` is given the capability to detect non-covalent interactions from the molecular structure and output them as an **`InteractionSet`** (a list of `{ kind, atoms, distance, angle, donor/acceptor role }`), independent of the structural data itself. Like the other formats, this is made round-trippable via MessagePack/YAML, so the `core`/renderer side can consume it without recomputation.
+
+| Type | Implementation approach |
+| --- | --- |
+| **Disulfide bond** | 1:1 port of the existing `ssbond.py` (`SSBond`) (SG-SG distance < 2.31 Å). |
+| **Salt bridge** | 1:1 port of the existing `ionpair.py` (`IonPair`) (center of a functional group such as GLU/ASP and the center of LYS/ARG/terminal group less than 4.0 Å apart). |
+| **Hydrogen bond** | **New implementation.** Backbone hydrogen bonds directly reuse the internal processing of the DSSP-equivalent algorithm in Section 10.1 (N-H...O=C detection via the Kabsch-Sander electrostatic model). For side-chain hydrogen bonds (Ser/Thr/Tyr hydroxyls, Asn/Gln/His amide/imidazole groups, etc.), a new donor/acceptor atom-type table is introduced, and detection is based on geometric criteria (distance D...A < ~3.5 Å, angle D-H...A > ~120°). A simplified detection mode using only heavy atoms is also provided for structures without explicit hydrogens (e.g. hydrogen-free PDBs). |
+| **CH-π interaction** | **New implementation.** A new ring-atom table is introduced for residues with aromatic rings (PHE/TYR/TRP/HIS), and the ring centroid and normal vector are computed. Detection is based on geometric criteria: the distance between the C-H side atom (or hydrogen) and the ring centroid, and the angle relative to the ring normal. Since the literature definition varies, default values (e.g. within 4.5 Å distance, within 40° angle) are exposed as **tunable parameters** rather than hard-coded. |
+
+**Computation timing:** `InteractionSet` is basically computed at structure load time (a single-frame snapshot). Recomputing it on every frame during trajectory playback is expensive (especially at the 1-million-atom scale), so the default is a static overlay computed once at load time, with "live recomputation per frame" available as an optional setting (off by default). Neighbor search reuses the spatial partitioning (BVH/Octree) introduced in Section 4.2, avoiding an O(n²) all-pairs search.
+
+**Display (Phase 6i-ii Implementation):**
+- **Data model:** Integrated into `Representation` (§6.2) as `kind: RepresentationKind::Interaction` with a dedicated sub-type filter `interaction_kinds: Vec<InteractionKind>` (defaulting to empty, which displays all interaction kinds). Individual kinds (`HydrogenBond`, `SaltBridge`, `CHPi`, `Disulfide`) can be toggled via the UI inspector or Python API.
+- **Selection rule:** An interaction is rendered if *at least one* of its endpoints intersects the atoms matched by `Representation.selection` (resolved via `core::interaction::resolve_interaction_atom_ids`). If `Representation.selection` is `Selector::All`, all detected interactions matching `interaction_kinds` are displayed.
+- **Coloring:** Defaults to kind-based semantic colors: Hydrogen bond = Yellow/Gold (`[1.0, 0.85, 0.1, 1.0]`), Salt bridge = Orange (`[1.0, 0.5, 0.0, 1.0]`), CH-π = Cyan (`[0.0, 0.8, 0.9, 1.0]`), Disulfide bond = Magenta (`[0.85, 0.2, 0.85, 1.0]`). When `color` is set to `ColorScheme::Uniform(c)`, that color overrides the kind-based default.
+- **Dashed line geometry & shader:** Cylinder stick instances connecting both endpoints are rendered with radius `0.08 Å` (slender compared to standard covalent sticks at `0.12 Å`). In the fragment shader (`fs_interaction`), distance along the cylinder axis in Å units is evaluated with a periodic pattern: period = `0.60 Å`, solid segment = `0.35 Å`, gap = `0.25 Å` (`dist - floor(dist / period) * period > 0.35` is discarded), yielding consistent dashed lines across all bond lengths.
+- **Culling and LOD handling:** Because the count of non-covalent interactions is orders of magnitude smaller than total atom counts (e.g. 38 lines in 1HLS, ~877 across all 20 models), interaction instances bypass GPU frustum culling and billboard impostor LOD tiers, rendering directly via a dedicated double-sided (`cull_mode: None`) wgpu pipeline with depth testing to ensure crisp, persistent visualization across all zoom levels.
+
+**Load-Time Detection and Endpoint Resolution (Phase 6i-i Implementation):**
+- **Detection & Storage:** During the structure loading pipeline (`structure_loader::parse_structure_bytes`), after topology resolution (`setup()`) and secondary structure estimation, `proteindf_bridge::InteractionSet::detect_all(model, None, None)` is invoked for each model, aggregating all results into a single `InteractionSet` stored in `AppState.interactions` (never recomputed by the rendering engine).
+- **Endpoint 3D Coordinate Resolution (`resolve_interaction_endpoints`):** For each `Interaction`, the 3D coordinates (`[f32; 3]`) of both endpoints are resolved according to the following rules:
+  1. Atom path: The 3D position of that specific atom.
+  2. CH-π aromatic ring (residue path): The centroid of the aromatic ring computed via `proteindf_bridge::ch_pi::calc_ring_geometry`.
+  3. Salt bridge (residue/functional group path): **[Provisional]** As a provisional measure until `proteindf-bridge` provides a public API returning functional group centers, the arithmetic mean (centroid) of all constituent atoms in the group is used.
+  4. Returns `None` if either endpoint cannot be resolved (never panics).
+- **Endpoint Atom ID Resolution (`resolve_interaction_atom_ids`):** Resolves the set of atom IDs corresponding to each endpoint using the identical 1-based traversal order of `iter_flat_atoms` (a single ID for an atom endpoint; all atom IDs under the residue for a residue endpoint). Used in Phase 6i-ii for filtering interactions intersecting `Representation.selection`.
+
+### 10.3 Structure File Export (PDB / mmCIF)
+
+YUI provides structure export capabilities to PDB and mmCIF formats in `core::structure_export::export_structure_to_string` by delegating directly to `proteindf-bridge`'s `Pdb` and `SimpleMmcif` formats (conforming to ROADMAP §5: no custom format serializers in YUI).
+- **Export Scope across Models:** In multi-model structures (e.g., NMR ensembles), the full structure encompassing all models is exported regardless of the currently displayed model (`active_model`), ensuring complete and lossless model preservation.
+- **Handling of Atomic Charges:**
+  - **PDB:** Serialized with `is_charge2tempfactor = false`, so charges go to the PDB charge column rather than the B-factor field. Bridge writes this column as an integer (`format!("{:+1.0}", charge)` in bridge's `pdb.rs`), so non-integer partial charges (e.g. from `.mol2`) are rounded to integers. Partial charges are therefore not preserved in PDB output either.
+  - **mmCIF:** Serialized using default options (`charge_to_b_factor = false`). Since the PDBx/mmCIF specification restricts `_atom_site.pdbx_formal_charge` to integers, structures with partial charges (such as those imported from `.mol2`) cannot be written as mmCIF formal charges. Rather than silently truncating/rounding charges or switching options, YUI returns a clear error directing users to export in PDB format, and the error states that PDB also rounds partial charges to integers.
+
+---
+
+## 11. QCLObot Integration (Visualizing Fragment-Growth Calculations)
+
+Reads `QCLObot` playbook-format files and treats the fragment-based calculation process itself as a visualization target.
+
+### 11.1 `*.QCLO.yaml` (QCLO Calculation Playbook)
+Each task has a `brd_file` (structure file reference) and a `fragments:` list, and each fragment references the structure via a **path string** such as `brd_select: /model_1/A/6/`. Since this uses the same syntax as the `Selector` defined in Section 6.2 (`proteindf-bridge`'s `Select_Path_wildcard`/`Select_PathRegex`), it can be resolved directly by the existing `Selector` without introducing a new parser.
+
+- **Step playback:** Since the QCLO method is computed via staged expansion — Step1 (single residue) → Step2 (3-residue window) → Step3 and beyond (sequential expansion) — the existing trajectory playback UI and GPU ring-buffer mechanism (Chapter 5) are reused to allow the calculation steps to be played back as an animation.
+- **Fragment display:** The fragment partitioning for each step is color-coded, and capping groups added via `add_ACE`/`add_NME` are rendered distinctly (e.g. semi-transparent) from the original structure.
+- **QC parameter display:** The `basis_set`, `XC_functional`, `guess`, and `J_engine`/`K_engine`/`XC_engine` of the currently selected fragment/task are shown in the inspector panel (right pane).
+
+### 11.2 Bidirectional Linking & YAML Editing (Tree ⇔ YAML Body ⇔ 3D View)
+
+The tree view, YAML body view, and 3D view of a `.QCLO.yaml` file are **bidirectionally linked**, and the YAML body is **editable in place**.
+
+- **Span-preserving parsing:** YAML is parsed not with `serde_yaml` but with a parser that preserves the original text's line/column range (span) per node (e.g. `marked_yaml`). This enables reverse lookup from "an arbitrary position in the body text" to "the corresponding tree node".
+- **`SelectionIndex`:** Caches a mapping from each tree node (Task/Fragment) → `Selector` (parsed from `brd_select`) → the set of atom IDs resolved by `proteindf-bridge`. Both a tree click and a body-text click ultimately only need to update `AppState.highlight: HighlightSet(Vec<AtomId>)` via this index.
+- **Reverse direction (3D → tree/body):** When an atom is clicked in the 3D view, the nodes belonging to the currently active step (the fragment-growth step being played back) that contain that atom are looked up in reverse via `SelectionIndex`, the corresponding tree node is highlighted and scrolled into view, and the corresponding line range in the YAML body is also highlighted and scrolled into view. To avoid ambiguous matches spanning multiple steps, the reverse lookup is restricted to "within the range of the currently active step".
+- **Editing methods (format-non-destructive):** Since there are two user editing paths, they are handled differently.
+  1. **Body text editing (`iced`'s `text_editor` widget):** When the user edits the text directly, the change is debounced and re-parsed, and the tree / `SelectionIndex` / 3D highlight are rebuilt. On parse failure, an error gutter is shown, and the last valid highlight state is preserved.
+  2. **Tree-operation-driven editing (GUI operations, e.g. renaming or reordering a fragment):** Since re-serializing the entire document would lose comments and layout, a **surgical edit** is performed that replaces only the text within the span range of the affected node, leaving the rest of the text (comments, section separators, etc.) untouched.
+- **Saving:** Edits are reflected immediately in memory (the text buffer), but writing to disk only happens via an explicit save action (e.g. Ctrl+S); unsaved changes are shown as a dirty indicator on the tab.
+
+### 11.3 `modeler.yml` (Structure Preprocessing Playbook)
+This has a DAG structure like `protonate` → `opt` → `neutralize` → `md`(solvation) → `opt`, where each task references a preceding task via `reference:`. This is displayed as a DAG in the UI, with each node corresponding to a call into the `ModelingProvider` defined in Chapter 3 (hydrogen addition, structural optimization, ion neutralization, MD solvation, etc.). Selecting a node allows previewing the structure at that stage.
+
+### 11.4 Highlighting the QM Calculation Region Within a Massive Structural Context
+
+The goal of this platform is "visualization research into canonical molecular orbital calculations themselves"; while the QM calculation target (the fragment set defined by QCLObot) is itself on the order of thousands to tens of thousands of atoms, the primary use case is to **position and display it within a massive structural context (up to ~1 million atoms), such as a cryo-EM complex** (the 1-million-atom GPU-driven rendering support in Section 4.2 exists mainly for this purpose).
+
+- Provides dedicated highlighting to visually distinguish the QM calculation target atom set defined by the QCLObot playbook (the union of all fragments resolved via `brd_select`) from the surrounding massive structure (a crystal structure, cryo-EM structure, etc., usually the remaining part of the same `AtomGroup`) — e.g. the QM region is rendered normally, while everything else is rendered as a monochrome/low-saturation, semi-transparent "context display".
+- This is also linked with LOD (Section 4.2): by default, the QM region is always rendered at maximum detail (ball-and-stick/ribbon, etc.), while the context region is simplified to impostors/surface-only depending on distance.
+
+---
+
+## 12. Visualization Research Support Features for Canonical Molecular Orbital Calculations
+
+Since the primary purpose is visualization research into protein canonical molecular orbital calculations (ProteinDF/QCLObot) themselves, the following four features are added.
+
+### 12.1 MO Browser (Navigating Large Orbital Lists)
+
+Since a canonical MO calculation for an entire protein can reach thousands to tens of thousands of occupied orbitals alone, a dedicated browsing UI is provided.
+
+- **List & filter:** Orbital energies, occupation numbers, and spin channels (for UHF/ROHF) read from `pdfparam.h5` are displayed in a list that can be filtered/sorted by a relative index based on HOMO/LUMO (e.g. HOMO-5 to LUMO+5) or by energy range. Since this can reach tens of thousands of entries, the `iced` side virtualizes the displayed rows to keep rendering load down.
+- **Energy-level diagram:** Displays a 2D energy-level (ladder) diagram with HOMO/LUMO explicitly marked, linked to the list and 3D view via clicking.
+- **On-demand cube generation:** Since pre-generating cube files for all orbitals is impractical, when an orbital without a generated cube is selected, ProteinDF's own `pdf-mkfld-mo` is invoked on the spot (using the same external-tool-invocation abstraction as `ModelingProvider` in Chapter 3) to generate and load the cube (an existing cube is preferred if present, and generation status is shown in the list via an icon, etc.).
+
+### 12.2 Per-Orbital Population/Contribution Mapping
+
+Visualizes, for the currently selected MO, how much each atom/fragment contributes, overlaid on the structure.
+
+- A new function is added to `proteindf-bridge` (as part of the `ProteinDF_pytools` integration) to compute **per-atom Mulliken contributions for each orbital** from the MO coefficient vector and the overlap matrix (S), outputting `OrbitalContribution { orbital_index, atom_contributions: Vec<(AtomId, f32)> }`.
+- On the rendering side, a new **`ScalarOverlay(Vec<(AtomId, f32)>)`** — a generalization of the `HighlightSet` (a binary highlight over a set of atom IDs) introduced in Section 11.2 — is added, overlaying the magnitude of the contribution as a color gradient (e.g. blue-white-red) on top of the base representation's color. This mechanism can also be repurposed in the future for visualizing other per-atom scalar values, such as B-factor or RMSF.
+
+### 12.3 Convergence/Fidelity Comparison Across QCLO Growth Steps
+
+Chapter 11 visualizes the **topology** of the fragment partitioning, but validating the QCLO method itself fundamentally requires comparing the **calculation results** of each step.
+
+- The calculation result (`pdfparam.h5`) corresponding to each `.QCLO.yaml` task (step) is associated, and the following metrics are computed and displayed across steps:
+  - **Energy convergence:** A line chart of the task's total energy (or the orbital energy of the fragment of interest) plotted in step order.
+  - **QCLO fidelity:** The overlap integral between the QCLO obtained at the previous stage and the canonical orbital at the following stage (computed via `proteindf-bridge`'s matrix operations; the closer the diagonal component is to 1, the better the hand-off).
+  - **Geometric RMSD:** RMSD of the atomic substructure common between steps, computed using the existing `Superposer` (Kabsch algorithm).
+- A dedicated "QCLO Convergence View" panel visualizes these, and clicking any step synchronizes the 3D view and MO browser (Section 12.1) to that step's results.
+
+### 12.4 Comparison Across Multiple Calculations (Diff View)
+
+Compares results from different calculation conditions (basis set, XC functional, fragment partitioning scheme, etc.) side by side.
+
+- Using the multi-tab mechanism of the center panel (Chapter 8), a "comparison mode" is provided that displays two or more `pdfparam.h5` results side by side, with camera synchronization across tabs.
+- **Difference density/difference MO display:** If the cube grids of two calculations occupy the same space (same origin, same grid spacing), a voxel-wise difference (`cube_A - cube_B`) is computed, and positive/negative regions are displayed as isosurfaces of different colors (similar to a difference electron-density map in crystallography). If the grids differ, resampling is performed before taking the difference.
+- Scalar quantities such as total energy and the HOMO-LUMO gap are listed side by side in a comparison summary table.
+
+---
+
+## 13. Terminal & Log Viewer
+
+Since the primary use case is monitoring and controlling long-running ProteinDF/QCLObot quantum chemistry jobs, a shell terminal and a `tail -f`-style log viewer are added to the Bottom pane (Chapter 8) alongside the Python console.
+
+### 13.1 Feasibility
+Both features are technically feasible without conflicting with the existing architecture: they reuse the async I/O design of Chapter 5 and the WebSocket delta-sync mechanism of Chapter 7. The main new engineering work is (a) a custom `iced` widget to render a terminal cell grid, since `iced` has no built-in terminal widget, and (b) extending the transport layer with a raw-byte/line-stream channel alongside `CollabPacket`.
+
+### 13.2 Terminal
+- **Session location:** Normally hosted by `backend`, so `frontend`, whether native or WASM, talks to a terminal session through the same transport abstraction as `CollabTransport` (Section 7.2). The PTY handling lives in the native crate `yui-pty` (`pty/`), which `backend` uses; the native desktop app also uses it for **"Connect (Local shell)"** (standalone, no backend): the shell runs on the same machine, in-process, and the terminal screen does not change. The web build has no local shell and always needs `backend`.
+- **Dedicated WebSocket Endpoint:** A dedicated bidirectional streaming endpoint `/api/terminal?rows={rows}&cols={cols}` is provided on `backend` (the secret goes in a header or the WebSocket subprotocol, §7.4, not in the URL). Keystrokes/commands flow upstream, and raw PTY output streams downstream.
+- **PTY spawning:** The `portable-pty` crate (cross-platform PTY: Unix pty / Windows ConPTY). Shell processes ($SHELL or /bin/sh) are spawned with `TERM=xterm-256color` and supervised with background reader/writer threads.
+- **Terminal state machine:** ANSI/VT escape-sequence parsing and cell-grid state management were evaluated between `alacritty_terminal` and `vt100`. While `alacritty_terminal` brings heavy dependencies and is tightly coupled to windowing and rendering pipelines, **`vt100` (v0.16)** was adopted because it operates as a pure in-memory data structure with zero C dependencies, full WASM compatibility, robust ANSI/VT100/xterm emulation, 256/truecolor support, scrollback, and cursor tracking.
+- **Rendering:** A custom `iced` terminal pane widget (`frontend/src/terminal_pane.rs`) reads the `vt100::Screen` state and renders the cell grid using `iced::widget::rich_text` with colored `span` runs. Monospace fonts, cell foreground colors (ANSI 16 colors, 256-color cube / grayscale, and 24-bit Truecolor RGB mapped via `vt100_color_to_iced`), bold text attributes, visible block cursor highlighting (`█`), a connection status toolbar, and quick command / control-key buttons (Enter, Tab, Ctrl+C) are supported. Cell background colors (`cell.bgcolor()`), reverse video (SGR 7: foreground and background swapped) and underline are drawn as `span` background/underline (`CellStyle`); blank cells that have a background or reverse video are kept when the line end is trimmed, so full-width bars (e.g. the status line of `less`) show. Not drawn: italic, dim, strikethrough, blink.
+- **I/O path:** Full-duplex WebSocket channel. Keystrokes and command submissions are queued and sent as raw bytes or JSON control messages (`TerminalInput`), while PTY output bytes (`TerminalOutput`) are fed directly into `vt100::Parser::process`. In WASM, this stream is driven through `gloo-net` WebSocket using concurrent tasks for user input and terminal output, bridging to `iced`'s subscription stream via `mpsc`.
+- **Direct typing and size.** Clicking the terminal screen gives it the keyboard (the border turns cyan); clicking anywhere else, switching the tab, hiding the pane or disconnecting takes it back. While it has the keyboard, every key press that no widget handled is translated by `terminal_pane::key_bytes` (text, Ctrl+letter, Alt+letter as ESC-prefixed, arrows/Home/End/PageUp/PageDown/Delete/Insert/F1-F12 as escape sequences, `ESC O A` style arrows while the program has set application-cursor mode, as `vim` and `less` do) and sent as input; the app shortcuts (Esc, Space, arrows, Ctrl+S) are not subscribed in that state, because the key subscription is swapped (§8). Cmd+key and Ctrl+Shift+key are not sent (Ctrl+Shift is reserved for copy and paste, not implemented yet). The input line below the screen stays (it is the way to type text through the input method, e.g. Japanese, and to paste). The screen is measured (`sensor`) and its rows and columns are computed from the cell size (`grid_for`; 0.6 x font size wide, 1.3 x + 1 px high); a change resizes the `vt100` screen and is sent to the PTY as the JSON message `{"type":"resize","rows":R,"cols":C}` (`TerminalOut::Resize`). The rows and columns in the connection URL are those at the time of "Connect" (`connect_rows`/`connect_cols`), kept fixed because the URL identifies the subscription.
+- **Selection, copy and paste.** Dragging on the screen selects cells (`selection`, row/column pairs found from the pointer with the same estimated cell size as the grid; highlighted with the palette's selection color; a click without dragging clears it; it is also dropped when output changes the selected text). Copy (`vt100` `contents_between`, trailing spaces trimmed per line) and paste go through `iced::clipboard` in `Yui::terminal_clipboard`, from Ctrl+Shift+C/V, Cmd+C/V, Shift+Insert (`clipboard_key`; plain Ctrl+C stays the interrupt) or the Copy/Paste buttons. Pasted text is wrapped in ESC[200~ … ESC[201~ when the program enabled bracketed paste, otherwise newlines become CR. Selection also works on the history view (a scroll clears it).
+- **History (scrollback).** The `vt100` parser keeps 1000 lines of history; the mouse wheel (3 lines per notch, `Scrolled`) and Shift+PageUp/PageDown (`scroll_key`, one screen minus a row) move the view with `set_scrollback`, which `vt100` keeps anchored while new output arrives. While scrolled back the cursor is not drawn and the toolbar shows the offset; any input (`enqueue_input`) returns to the live screen. The alternate screen (`less`, `vim`) has no history, so scrolling is ignored there.
+- **Multiple sessions:** Single session implemented for Phase 6a-ii; multi-session tabs planned for future extensions (Chapter 8, Section 12.4).
+- **Access control:** A terminal session grants effectively arbitrary command execution on the machine running `backend`. Access is gated from connection initiation by the role model of Section 7.1 via `RoleResolver`: **only the Host role is permitted**. Requests without a secret are rejected with HTTP 401 Unauthorized, and requests with an unknown secret or an Editor / Viewer secret are rejected with HTTP 403 Forbidden. Requests from another web site (`Origin` / `Host`, §7.4) are rejected first, and on a non-loopback bind the endpoint is closed unless `YUI_ENABLE_TERMINAL=1`.
+
+### 13.3 Log Viewer
+- **Sources:** (a) an arbitrary log file path (local, or on the machine running `backend`), and (b) the stdout/stderr of subprocesses already invoked by the platform itself — `ModelingProvider` external-tool calls (Chapter 3) and on-demand cube generation via `pdf-mkfld-mo` (Section 12.1) — captured directly.
+- **Dedicated Streaming Endpoint & Security:** Rather than overloading `/api/collab` (which carries binary MessagePack `AppStateDelta` packets), a dedicated WebSocket endpoint `/api/logs?path={path}&lines={initial_lines}` is introduced. This separates lifecycle management and data payloads (plain text line streaming via JSON `LogStreamMessage`) and allows independent subscription to multiple log sources.
+- **Directory Allowlist & Path Sanitization:** To prevent path-traversal vulnerabilities and arbitrary file exposure, tailing is strictly confined to the directory tree under `backend`'s `log_root` (configurable via `YUI_LOG_ROOT`, defaulting to `./logs`). Requested paths are checked against `..` traversals and absolute roots, joined to `log_root`, and canonicalized to verify they remain strictly within the allowlisted hierarchy before any file I/O or watcher attachment occurs. Requests targeting paths outside `log_root` are rejected immediately with HTTP 403 Forbidden.
+- **Access Control & Role Verification:** Unlike anonymous HTTP endpoints, `/api/logs` enforces authentication via the same `RoleResolver` abstraction used in collaboration (Section 7.1). Connections missing a token are rejected with HTTP 401 Unauthorized, and unresolvable/invalid tokens receive HTTP 403 Forbidden before WebSocket upgrade occurs. Being read-only, all authenticated roles (Host, Editor, and Viewer) are permitted once verified.
+- **Tailing mechanism:** `backend` monitors file growth using the `notify` crate (FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on Windows) paired with an asynchronous tokio channel. If the target file does not yet exist when streaming begins (e.g. pending job startup), `backend` enters a non-blocking wait loop, automatically starting tailing once the file is created. Newly appended bytes are decoded as UTF-8 lines from the tracked byte offset and pushed to clients as an append-only stream, reusing the delta-sync principle of Section 7.3. In WASM, the client connects over `gloo-net` WebSocket, receives line messages, and feeds them into the same ring buffer seamlessly.
+- **Display & Client State:** Client-side (`frontend`), lines are ingested into a bounded ring buffer (default: 5,000 lines, discarding oldest lines on overflow). The UI provides `tail -f`-style auto-scrolling with a manual toggle / pause, instant substring filtering, a path input toolbar, and clear controls.
+- **Backpressure / size limits:** Since ProteinDF/QCLObot job logs can reach gigabytes, the client retains only the bounded ring buffer in memory; initial connection requests tail only the last N lines (default: 100).
+
+### 13.4 UI Placement
+Both features are integrated into the Bottom pane defined in Chapter 8 and Section 14.2, organized as a 4-tab bar: **Log Viewer / Python Console / Terminal / AI Chat**. The active tab is switchable via buttons, and the entire Bottom pane remains independently resizable via `pane_grid` alongside Left, Center, and Right panes.
+
+---
+
+## 14. AI Chat Assistant & LLM Provider Abstraction
+
+In addition to the one-shot voice-command handling previously described in Section 6.3, the platform provides a persistent, conversational **AI chat assistant** that can answer questions about the loaded structure/calculation and, via tool-calling, drive the same Python API surface described in Sections 6.1/6.2. The assistant is backed by a **pluggable `LlmProvider` abstraction**, letting the user choose between cloud APIs (Claude, Gemini) and a local LLM, following the same design philosophy as `ModelingProvider` (Chapter 3) and `CollabTransport` (Section 7.2).
+
+### 14.1 `LlmProvider` Abstraction
+```rust
+trait LlmProvider {
+    fn chat(&self, messages: &[ChatMessage], tools: &[ToolSpec]) -> Result<ChatStream>;
+}
+```
+- Anthropic (Claude), Google (Gemini), and local models served via Ollama's OpenAI-compatible HTTP endpoint are all accessed as an HTTP chat-completion API, differing only in endpoint URL, authentication header, and a thin request/response schema adapter — so a single `reqwest`-based implementation covers all three, with only the adapter module being provider-specific.
+- The active backend (model name, endpoint, API key) is configured in YAML, mirroring the `ModelingProvider` backend-selection mechanism of Section 3.1.
+- **Hosting:** Following the pattern established for the Terminal in Section 13.2, `LlmProvider` calls are always made from `backend` — even in the native desktop build — so API keys never reach a WASM client, and `frontend` (native or Web) only ever talks to `backend` over the existing WebSocket/REST transport. This also keeps chat-history persistence (Section 14.5) in one place.
+
+### 14.2 Chat Panel (UI)
+- Added as a fourth tab of the Bottom pane defined in Sections 8/13.4, alongside Python Console / Terminal / Log Viewer: **Python Console / Terminal / Log Viewer / AI Chat**.
+- A standard chat UI: a scrollable message list (user/assistant turns, streamed token-by-token) plus a text input box.
+- Voice input (Section 6.3, Web Speech API) is treated as an alternate way to populate the same input box — a transcribed utterance becomes a chat message rather than being routed through a separate one-shot pipeline.
+
+### 14.3 Tool-Calling on Top of the Existing Python API
+- The assistant is not given a separate command language: tool calls map 1:1 onto the `Selector`/`Representation` Python API already defined in Section 6.2 (`yui.select(...).show(...).color_by(...)`, etc.), so no second execution surface needs to be maintained.
+- **Context grounding:** Rather than sending the full structure (up to ~1 million atoms) to the LLM, `backend` assembles a compact **state digest** — current selection, chain/residue summary, MO browser state (Section 12.1), QCLO convergence metrics (Section 12.3) — and exposes it to the model as tool-callable read functions (e.g. `get_selection()`, `get_orbital_info(index)`), so the model requests only the specific data it needs for a given turn.
+- Generated tool calls are executed with the permissions of the invoking user's Role (Section 7.1) — e.g. a Viewer's chat session can query state and receive explanations but cannot mutate `AppState`, exactly as a Viewer cannot do so via direct mouse/Python input.
+
+### 14.4 Security & Privacy
+- Sending any part of the structure or calculation results to a cloud provider (Claude, Gemini) means that data leaves the local/cluster environment — significant for unpublished structures or proprietary calculations. Enabling a cloud `LlmProvider` backend is therefore an explicit, per-workspace opt-in; the local-LLM backend (Ollama) is offered as the default, data-stays-local option.
+- API keys are held only in `backend`'s configuration (e.g. environment variables), never exposed to `frontend` — consistent with the always-via-backend design of Section 14.1.
+- Because the state digest in Section 14.3 may still reveal sequence/annotation information, its content is configurable per field, so a workspace can, for example, allow geometry-derived scalars (RMSD, energies) to be sent to a cloud provider while withholding residue/sequence identity.
+
+### 14.5 Streaming & History
+- Responses are streamed (SSE, as natively supported by the Claude/Gemini/Ollama APIs) and forwarded to the client incrementally over the same delta-sync-style WebSocket channel used elsewhere (Section 7.3), reusing the async I/O task pattern of Chapter 5.
+- Chat history is persisted by `backend` per session/workspace (not by `frontend`), so it survives client reconnects and can be exported alongside the YAML state (Section 2.1), keeping a reproducible record of what the assistant was asked and did.
+
+### 14.6 Relationship to Section 6.3
+Section 6.3 previously described a one-shot pipeline in which transcribed speech was analyzed and directly converted into a Python command. That flow is now folded into this chapter: voice is simply one input modality feeding the same chat message stream (Section 14.2), and the resulting Python execution is one possible outcome of the tool-calling loop described in Section 14.3, rather than a separate mechanism.

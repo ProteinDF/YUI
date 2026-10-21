@@ -1,0 +1,11 @@
+[package]
+name = "yui-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A PTY session (a local shell) for YUI: the backend's terminal and the desktop app's standalone terminal."
+
+[dependencies]
+portable-pty = "0.9"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+tracing = "0.1"

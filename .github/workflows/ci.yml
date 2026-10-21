@@ -1,0 +1,76 @@
+name: CI
+
+# Runs on every pull request and on pushes to main / develop (Actions are free for a public
+# repository), and can also be started by hand. `scripts/check.sh --trunk` runs the same
+# checks locally; run it before opening a pull request.
+'on':
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure Python library path
+        run: |
+          LIBDIR=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          echo "LD_LIBRARY_PATH=$LIBDIR:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - name: Set up Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run verification checks
+        run: ./scripts/check.sh
+
+  wasm-bundle:
+    name: Trunk Build (WASM)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Set up Cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install trunk
+        run: |
+          TRUNK_VERSION="0.21.14"
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" | sudo tar -xz -C /usr/local/bin
+          trunk --version
+
+      - name: Run trunk build
+        run: |
+          cd frontend && trunk build index.html

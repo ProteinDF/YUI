@@ -1,0 +1,12 @@
+[package]
+name = "yui-renderer-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yui-core = { path = "../core" }
+clap = { version = "4", features = ["derive"] }
+
+# TODO: ヘッドレスwgpuによる高解像度PNG/SVG/オフラインレンダリングは未実装。
+# architecture.md 4章・11.4節を参照。

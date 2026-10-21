@@ -1,0 +1,72 @@
+name: Release installers
+
+# Builds the native installers with cargo-packager (the configuration is
+# [package.metadata.packager] in frontend/Cargo.toml):
+#   - Linux:   .deb and .AppImage
+#   - macOS:   .dmg (Apple Silicon)
+#   - Windows: NSIS setup .exe
+# Building all installers takes long (the macOS runner the most), so
+# this workflow runs only when started by hand ("Run workflow" in the Actions tab, or
+# `gh workflow run release-installers.yml --ref <tag-or-branch>`), never on push or pull request.
+# The installers are NOT signed or notarized (no certificates are configured): macOS and Windows
+# warn about an unknown publisher on the first launch (see README, "Installing").
+# The results are uploaded as workflow artifacts (kept 14 days); attach them to the GitHub release by hand.
+# A Windows .msi is not built: the MSI version rules (first field below 256) do not fit the CalVer
+# version (2026.10.4); see architecture.md chapter 9.
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installers:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (deb, AppImage)
+            os: ubuntu-22.04
+            formats: deb,appimage
+          - name: macOS (dmg, Apple Silicon)
+            os: macos-14
+            formats: dmg
+          - name: Windows (NSIS setup)
+            os: windows-latest
+            formats: nsis
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+
+      - name: Build the installers
+        # beforePackagingCommand in frontend/Cargo.toml builds the release binaries first
+        run: cargo packager --release -f ${{ matrix.formats }}
+
+      - name: Upload the installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: yui-installer-${{ runner.os }}
+          path: |
+            target/packager/*.deb
+            target/packager/*.AppImage
+            target/packager/*.dmg
+            target/packager/*.exe
+          if-no-files-found: error
+          retention-days: 14

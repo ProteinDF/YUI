@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "core-py",
+    "frontend",
+    "backend",
+    "pty",
+    "renderer-native",
+]
+
+[workspace.package]
+version = "2026.10.10"
+edition = "2024"
+license = "GPL-3.0-or-later"

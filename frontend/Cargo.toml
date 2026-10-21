@@ -1,0 +1,78 @@
+[package]
+name = "yui-frontend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+yui-core = { path = "../core" }
+iced = { version = "0.14", features = ["advanced"] }
+wgpu = "27.0"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
+vt100 = "0.16"
+# エディタのスクロールバーで、折り返しの行数を見積もる（文字の表示幅）
+unicode-width = "0.2"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+reqwest = { version = "0.12", default-features = false }
+rfd = "0.17"
+# PNG の書き出し（File → Export Image (PNG)...）
+png = "0.17"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# standalone の端末（同じマシンのシェル）。backend と同じ PTY の処理（`pty/`）
+yui-pty = { path = "../pty" }
+iced = { version = "0.14", features = ["tokio", "advanced"] }
+tokio-tungstenite = "0.29"
+tokio = { version = "1", features = ["rt"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# 利用者ごとの設定ファイルの場所（OS の設定フォルダ）と、設定したフォントが入っているかの確認
+dirs = "6"
+fontdb = "0.23"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["console", "History", "Location", "Storage", "Window"] }
+gloo-net = { version = "0.6", default-features = false, features = ["websocket"] }
+wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+iced_test = "0.14"
+# WGSL シェーダーを GPU なしで構文・型の検査にかける（viewport/pipeline.rs のテスト）
+naga = { version = "27", features = ["wgsl-in"] }
+# proteindf-bridge release tag containing §3.14 (AtomGroup::setup()) and mmCIF export.
+proteindf-bridge = { git = "https://github.com/ProteinDF/ProteinDF_bridge.git", tag = "2026.10.7" }
+
+# インストーラー（cargo-packager）の設定。`scripts/build-installers.sh` と、手動実行のワークフロー
+# `.github/workflows/release-installers.yml` が使う。バージョンはワークスペースのものを使う。
+# パスは、この Cargo.toml のあるフォルダ（frontend/）からの相対パス。
+[package.metadata.packager]
+name = "yui"
+productName = "YUI"
+identifier = "io.github.proteindf.yui"
+publisher = "Toshiyuki HIRANO"
+authors = ["Toshiyuki HIRANO"]
+category = "Education"
+description = "Molecular modeling and visualization platform for ProteinDF / QCLObot results"
+longDescription = "YUI visualizes and edits molecular structures and quantum chemistry results (PDB, mmCIF, XYZ trajectories, Gaussian CUBE) in a GPU-accelerated 3D viewport, with ribbon, surface, isosurface and interaction displays, and exports PNG, SVG and animations. This package also contains the optional collaboration backend (yui-backend)."
+homepage = "https://github.com/ProteinDF/YUI"
+licenseFile = "../LICENSE"
+# アプリ（GPL v3）と同梱フォント（SIL OFL 1.1）のライセンス文。どちらも、配布物に一緒に入れることを求める
+resources = ["assets/*-OFL.txt", "../LICENSE"]
+icons = ["../packaging/icons/icon.icns", "../packaging/icons/icon-*.png", "../packaging/icons/icon.ico"]
+binariesDir = "../target/release"
+outDir = "../target/packager"
+binaries = [
+    { path = "yui-frontend", main = true },
+    { path = "yui-backend" },
+]
+beforePackagingCommand = "cargo build --release -p yui-frontend -p yui-backend"
+
+[package.metadata.packager.deb]
+# 実行時に読み込む共有ライブラリのパッケージ（Debian / Ubuntu）。ビルドしたバイナリは、リンクの上では
+# libc / libm / libgcc だけに依存し（`ldd`）、窓・入力・描画のライブラリは、winit / wgpu が起動時に読み込む。
+depends = ["libc6", "libxkbcommon0", "libwayland-client0", "libx11-6", "libxkbcommon-x11-0", "libxcb1", "libvulkan1 | libgl1"]
+section = "science"

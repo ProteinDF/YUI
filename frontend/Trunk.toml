@@ -1,0 +1,12 @@
+# `trunk serve` / `trunk build` の設定（frontend フォルダで実行する）。
+#
+# 開発用の `trunk serve --port 8085 index.html` は、`/api/` へのリクエスト（HTTP と、コラボの WebSocket）を
+# バックエンド（`127.0.0.1:8080`）へ転送する。ブラウザ版は、ページを配信したサーバー自身の `/api/collab`
+# に接続するので（`state_sync::resolve_wasm_collab_url`）、`?collab=ws://127.0.0.1:8080` を付けなくても、
+# バックエンドを起動してあれば、つながる。バックエンドがなければ、転送は失敗し、単独の動作になる。
+[[proxy]]
+backend = "ws://127.0.0.1:8080/api/collab"
+ws = true
+
+[[proxy]]
+backend = "http://127.0.0.1:8080/api/"

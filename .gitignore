@@ -1,0 +1,9 @@
+/target
+.DS_Store
+dist/
+
+# Local tool configuration (MCP)
+.mcp.json
+
+# Python bytecode
+__pycache__/
