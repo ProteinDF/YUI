@@ -21,10 +21,14 @@ mod playback;
 mod playback_bar;
 mod png_export;
 mod project_tree_pane;
-// 段階 1: UI からはまだ呼ばない（配線は Phase 6k-i で行う）
+// UI からはまだ直接呼ばない（プラグインの読み込みが使う）。メニューとコマンドへの配線は 6k-iii
 #[cfg(all(feature = "python", not(target_arch = "wasm32")))]
 #[allow(dead_code)]
 mod python_runtime;
+// プラグインの読み込み（6k-ii）。一覧の表示など、まだ使わない項目があるので dead_code を許す
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+mod plugins;
 mod representation_inspector;
 mod ribbon;
 mod selection;
@@ -59,6 +63,15 @@ pub fn main() -> iced::Result {
     // backend に渡す秘密（--token / YUI_TOKEN / 接続ファイル、ブラウザは URL の #token=）
     backend_auth::init();
     let loaded = user_settings::load_startup_settings();
+    // `plugins: enabled:` に書かれたプラグインを読む。失敗の理由は、設定の警告と同じくステータスバーに出す
+    #[cfg(not(target_arch = "wasm32"))]
+    let loaded = {
+        let mut loaded = loaded;
+        loaded
+            .warnings
+            .extend(plugins::start(&loaded.settings.plugins_enabled));
+        loaded
+    };
     fonts::init(&user_settings::font_choice(&loaded.settings));
     text_editor_pane::set_scrollbar(loaded.settings.editor.scrollbar.unwrap_or(true));
     crate::ui_style::set_theme(loaded.settings.theme);
