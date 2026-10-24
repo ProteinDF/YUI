@@ -5947,6 +5947,7 @@ dependencies = [
  "naga",
  "png 0.17.16",
  "proteindf-bridge",
+ "pyo3",
  "reqwest",
  "rfd",
  "serde",

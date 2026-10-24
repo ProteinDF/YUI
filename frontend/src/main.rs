@@ -21,6 +21,10 @@ mod playback;
 mod playback_bar;
 mod png_export;
 mod project_tree_pane;
+// 段階 1: UI からはまだ呼ばない（配線は Phase 6k-i で行う）
+#[cfg(all(feature = "python", not(target_arch = "wasm32")))]
+#[allow(dead_code)]
+mod python_runtime;
 mod representation_inspector;
 mod ribbon;
 mod selection;
