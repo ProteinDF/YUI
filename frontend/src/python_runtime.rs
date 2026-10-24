@@ -21,6 +21,7 @@ const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
 
 enum Request {
     Eval(String, Sender<EvalResult>),
+    Exec(String, Sender<EvalResult>),
     Quit,
 }
 
@@ -70,6 +71,19 @@ impl PythonRuntime {
         }
         result
     }
+
+    /// 文（`import` や代入、`def` など）を実行するよう依頼する。成功は `Ok("")`、失敗は例外の文字列。
+    pub fn exec(&self, code: &str) -> Receiver<EvalResult> {
+        let (reply, result) = mpsc::channel();
+        if self
+            .requests
+            .send(Request::Exec(code.to_string(), reply.clone()))
+            .is_err()
+        {
+            let _ = reply.send(Err("the Python thread has stopped".into()));
+        }
+        result
+    }
 }
 
 impl Drop for PythonRuntime {
@@ -101,6 +115,9 @@ fn run(inbox: Receiver<Request>, ready: Sender<Result<(), String>>, finished: Se
         match request {
             Request::Eval(code, reply) => {
                 let _ = reply.send(eval_one(&code));
+            }
+            Request::Exec(code, reply) => {
+                let _ = reply.send(exec_one(&code));
             }
             Request::Quit => break,
         }
@@ -154,6 +171,15 @@ fn eval_one(code: &str) -> EvalResult {
         })
     }));
     outcome.unwrap_or_else(|_| Err("the Python call panicked".into()))
+}
+
+fn exec_one(code: &str) -> EvalResult {
+    let code = CString::new(code).map_err(|e| e.to_string())?;
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        Python::attach(|py| py.run(&code, None, None).map_err(|e| format!("{e}")))
+    }));
+    outcome.unwrap_or_else(|_| Err("the Python call panicked".into()))?;
+    Ok(String::new())
 }
 
 #[cfg(test)]

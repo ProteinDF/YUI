@@ -182,6 +182,8 @@ pub struct UserSettings {
     pub terminal: TerminalSettings,
     /// メニューとタブの見た目（`ui:`）
     pub ui: UiSettings,
+    /// 読み込むプラグインの名前（`plugins: enabled:`）。書かれていなければ空（何も読まない）
+    pub plugins_enabled: Vec<String>,
 }
 
 /// 読み込んだ設定と、読み込み中に見つけた問題（警告）
@@ -298,6 +300,7 @@ pub fn parse_settings(
     parse_render_settings(root.get("render"), source, &mut loaded);
     parse_terminal_settings(root.get("terminal"), source, &mut loaded);
     parse_ui_settings(root.get("ui"), source, &mut loaded);
+    parse_plugins_settings(root.get("plugins"), source, &mut loaded);
 
     let Some(editor) = root.get("editor") else {
         return loaded;
@@ -357,6 +360,43 @@ pub fn parse_settings(
         )),
     }
     loaded
+}
+
+/// `plugins:` の項目（`enabled`: 読み込むプラグインの名前の一覧）。
+/// 一覧でない・名前でない項目は無視して、警告する。
+fn parse_plugins_settings(
+    plugins: Option<&serde_yaml::Value>,
+    source: &str,
+    loaded: &mut LoadedSettings,
+) {
+    let map = match plugins {
+        None | Some(serde_yaml::Value::Null) => return,
+        Some(serde_yaml::Value::Mapping(m)) => m,
+        Some(_) => {
+            loaded
+                .warnings
+                .push(format!("{source}: 'plugins' must be a mapping; ignored"));
+            return;
+        }
+    };
+    match map.get("enabled") {
+        None | Some(serde_yaml::Value::Null) => {}
+        Some(serde_yaml::Value::Sequence(items)) => {
+            for item in items {
+                match item {
+                    serde_yaml::Value::String(name) => {
+                        loaded.settings.plugins_enabled.push(name.clone())
+                    }
+                    _ => loaded.warnings.push(format!(
+                        "{source}: 'plugins.enabled' items must be plugin names; item ignored"
+                    )),
+                }
+            }
+        }
+        Some(_) => loaded.warnings.push(format!(
+            "{source}: 'plugins.enabled' must be a list of plugin names; ignored"
+        )),
+    }
 }
 
 /// `ui:` の項目（`tab_style`、`tab_font_size`、`corner_radius`、`hide_empty_docks`、`colors` / `dark_colors` /
@@ -1149,6 +1189,34 @@ mod tests {
         let l = parse_settings("ui: 3\n", "s", &any);
         assert_eq!(l.warnings.len(), 1);
         assert_eq!(l.settings.ui, UiSettings::default());
+    }
+
+    #[test]
+    fn test_plugins_enabled_is_a_list_of_names() {
+        let l = parse_settings(
+            "plugins:\n  enabled:\n    - sample\n    - my-plugin\n",
+            "s",
+            &any,
+        );
+        assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+        assert_eq!(l.settings.plugins_enabled, ["sample", "my-plugin"]);
+
+        // 名前でない項目と、一覧でない値は無視して、警告する
+        let l = parse_settings("plugins:\n  enabled:\n    - 3\n", "s", &any);
+        assert!(l.settings.plugins_enabled.is_empty());
+        assert_eq!(l.warnings.len(), 1, "{:?}", l.warnings);
+
+        let l = parse_settings("plugins:\n  enabled: sample\n", "s", &any);
+        assert!(l.settings.plugins_enabled.is_empty());
+        assert_eq!(l.warnings.len(), 1, "{:?}", l.warnings);
+
+        // 無ければ何も読まない
+        assert!(
+            parse_settings("", "s", &any)
+                .settings
+                .plugins_enabled
+                .is_empty()
+        );
     }
 
     #[test]
