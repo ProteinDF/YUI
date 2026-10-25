@@ -180,6 +180,12 @@ pub enum Message {
         id: String,
         payload: serde_json::Value,
     },
+    /// プラグインの一覧を開く（View → Plugins...）
+    PluginsDialogOpen,
+    /// プラグインの一覧を閉じる
+    PluginsDialogClose,
+    /// 一覧で、このプラグインの有効・無効を切り替える（設定に書く。次回の起動から効く）
+    PluginToggled(String),
     /// プラグインのコマンドが終わった。失敗なら理由が入る（そのプラグインは外される）
     PluginCommandDone {
         plugin: String,

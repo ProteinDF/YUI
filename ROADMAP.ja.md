@@ -163,11 +163,11 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 - **フェーズ6j-iii (完了) — 招待と乱用の制限。** 期限つきで取り消せる Editor / Viewer の秘密のための `POST/GET /api/invites` と `DELETE /api/invites/{id}`（開いている接続は、取り消しですぐ、期限切れは期限の時刻に閉じる）、`scripts/yui-invite.py`、接続元ごとの締め出し（60 秒の間に 10 回失敗すると、60 秒の 429）。アプリには、招待を作り、一覧し、取り消す **File → Share Session...** がある。
 
 ### フェーズ6k — Python プラグイン
-`architecture.ja.md` 6.4節に設計した: プロジェクトの外の開発者が Python で機能を足す。ネイティブ版のアプリに組み込んだ CPython で動かす（`PyO3`、Cargo の feature `python`。ブラウザー版には当面プラグインはない）。未着手。
-- **フェーズ6k-i — 組み込みの Python の基盤。** `frontend` の feature `python`、UI スレッドとチャネルでつながる Python のスレッド、メニューと同じ関数での変更の実行（8.4節）、最小限の公開 API（`yui.plugin`）。フェーズ6h-i（Python コンソール）と共有する。インストーラーは、当面 `python` の feature なしで作る（6.4節）。Python の初期化に失敗しても、プラグインが無効になるだけにする。インストーラーへの CPython の同梱は、プラグインをインストーラーの利用者に届ける段で行う。
-- **フェーズ6k-ii — プラグインの読み込み。** `plugin.yaml` と `register(app)` を置く `<config>/yui/plugins/<name>/`、`api_version` の確認、`settings.yaml` の `plugins.enabled`（有効にするまで動かさない）、失敗のステータスバーと Log Viewer への表示。この段階の前に、`pip` / entry points にも対応するかを決める。
-- **フェーズ6k-iii — メニューとコマンド。** 8.7節の受け口を使う `add_command`（識別子は `plugin.<name>.` の下）と `add_menu_item`。右クリックの対象をコマンドに渡す。
-- **フェーズ6k-iv — プラグインの一覧と、プラグインを書く人のための文書。** アプリのプラグインの一覧（有効・無効、版、状態）、プラグインの書き方の手引き（英語と日本語）、公開 API の一覧、`api_version` の決まり、例のプラグイン。
+`architecture.ja.md` 6.4節に設計した: プロジェクトの外の開発者が Python で機能を足す。ネイティブ版のアプリに組み込んだ CPython で動かす（`PyO3`、Cargo の feature `python`。ブラウザー版には当面プラグインはない）。ネイティブ版では完了（6k-i から 6k-iv）。まだ: `pip` / entry points、`numpy` などの外部パッケージ、Log Viewer での `plugin.log` の自動表示。
+- **フェーズ6k-i — 組み込みの Python の基盤（完了）。** `frontend` の feature `python`、UI スレッドとチャネルでつながる Python のスレッド、メニューと同じ関数での変更の実行（8.4節）、最小限の公開 API（`yui.plugin`）。フェーズ6h-i（Python コンソール）と共有する。インストーラーは、当面 `python` の feature なしで作る（6.4節）。Python の初期化に失敗しても、プラグインが無効になるだけにする。インストーラーへの CPython の同梱は、プラグインをインストーラーの利用者に届ける段で行う。
+- **フェーズ6k-ii — プラグインの読み込み（完了。失敗はステータスバーと `plugin.log` に出す。Log Viewer にはまだ出さない）。** `plugin.yaml` と `register(app)` を置く `<config>/yui/plugins/<name>/`、`api_version` の確認、`settings.yaml` の `plugins.enabled`（有効にするまで動かさない）、失敗のステータスバーと Log Viewer への表示。この段階の前に、`pip` / entry points にも対応するかを決める。
+- **フェーズ6k-iii — メニューとコマンド（完了）。** 8.7節の受け口を使う `add_command`（識別子は `plugin.<name>.` の下）と `add_menu_item`。右クリックの対象をコマンドに渡す。
+- **フェーズ6k-iv — プラグインの一覧と、プラグインを書く人のための文書（完了）。** アプリのプラグインの一覧（有効・無効、版、状態）、プラグインの書き方の手引き（英語と日本語）、公開 API の一覧、`api_version` の決まり、例のプラグイン。
 
 ### フェーズ7 — QCLObot連携 & 正準MO可視化研究支援機能
 - 11章（`.QCLO.yaml` プレイブック、ステップ再生、ツリー/YAML本文/3Dビューの双方向リンク、`modeler.yml` のDAG表示）。

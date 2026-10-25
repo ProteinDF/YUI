@@ -755,6 +755,18 @@ pub fn set_key_in_text(text: &str, key: &str, value: &str) -> String {
 /// 他の設定とコメントは残す。失敗したときは、画面に出す説明を返す。
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_setting(key: &str, value: &str) -> Result<(), String> {
+    edit_settings_file(|current| set_key_in_text(current, key, value))
+}
+
+/// 有効にしたプラグインの一覧を、設定ファイルの `plugins: enabled:` に書く（他の設定とコメントは残す）。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_plugins_enabled(names: &[String]) -> Result<(), String> {
+    edit_settings_file(|current| set_plugins_enabled_in_text(current, names))
+}
+
+/// 設定ファイルを読み、`edit` で書き換えて書き戻す（ファイルがなければ雛形から作る）。
+#[cfg(not(target_arch = "wasm32"))]
+fn edit_settings_file(edit: impl FnOnce(&str) -> String) -> Result<(), String> {
     let path = settings_path().ok_or_else(|| "no settings folder on this system".to_string())?;
     let current = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -765,8 +777,46 @@ pub fn save_setting(key: &str, value: &str) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create '{}': {e}", parent.display()))?;
     }
-    std::fs::write(&path, set_key_in_text(&current, key, value))
+    std::fs::write(&path, edit(&current))
         .map_err(|e| format!("could not write '{}': {e}", path.display()))
+}
+
+/// 設定の文字列の `plugins:` の `enabled:` の一覧だけを書き換える。他の行（コメントなど）は残す。
+/// `plugins:` が無ければ末尾に足す。名前は `plugins::valid_name` を通ったものだけを渡すこと。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_plugins_enabled_in_text(text: &str, names: &[String]) -> String {
+    let list = format!("  enabled: [{}]", names.join(", "));
+    let mut out: Vec<String> = Vec::new();
+    let mut lines = text.lines().peekable();
+    let mut found = false;
+    while let Some(line) = lines.next() {
+        if !found && line.trim_end() == "plugins:" {
+            found = true;
+            out.push(line.to_string());
+            out.push(list.clone());
+            // `plugins:` の下の行のうち、`enabled:` とその続き（`- 名前`）だけを捨てる
+            while let Some(next) = lines.peek() {
+                if !next.is_empty() && !next.starts_with(' ') && !next.starts_with('\t') {
+                    break;
+                }
+                let trimmed = next.trim_start();
+                let drop = trimmed.starts_with("enabled:") || trimmed.starts_with("- ");
+                let next = lines.next().unwrap_or_default();
+                if !drop {
+                    out.push(next.to_string());
+                }
+            }
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !found {
+        out.push("plugins:".to_string());
+        out.push(list);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
 }
 
 /// 設定の 1 項目を、利用者ごとの設定に書き込む（ブラウザ版: `localStorage`）。
@@ -1382,5 +1432,27 @@ mod tests {
         let l = parse_settings("terminal: 5\neditor:\n  font_size: 15\n", "s", &any);
         assert!(l.warnings[0].contains("'terminal' must be a mapping"));
         assert_eq!(l.settings.editor.font_size, Some(15.0));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_plugins_enabled_is_rewritten_and_comments_are_kept() {
+        let names = vec!["alpha".to_string(), "beta-2".to_string()];
+        let text = "# my settings\neditor:\n  font_size: 15\nplugins:\n  # keep me\n  enabled: [old]\n  - old2\nui:\n  theme: dark\n";
+        let out = set_plugins_enabled_in_text(text, &names);
+        assert_eq!(
+            out,
+            "# my settings\neditor:\n  font_size: 15\nplugins:\n  enabled: [alpha, beta-2]\n  # keep me\nui:\n  theme: dark\n"
+        );
+
+        // `plugins:` が無いときは末尾に足す。空の一覧も書ける。
+        let added = set_plugins_enabled_in_text("editor:\n  font_size: 15\n", &[]);
+        assert_eq!(added, "editor:\n  font_size: 15\nplugins:\n  enabled: []\n");
+
+        // 書き換えた結果は、そのまま読める
+        let any = |_: &str| true;
+        let loaded = parse_settings(&out, "s", &any);
+        assert_eq!(loaded.settings.plugins_enabled, names);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
     }
 }

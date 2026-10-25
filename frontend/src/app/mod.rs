@@ -95,6 +95,15 @@ pub struct Yui {
     pub(super) show_right: bool,
     pub(super) show_bottom: bool,
     pub(super) show_about: bool,
+    /// プラグインの一覧を開いているか（ネイティブ版だけ使う）
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) show_plugins: bool,
+    /// 一覧の行（開いたとき、切り替えたときに作り直す）
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) plugin_rows: Vec<crate::plugin_list::Row>,
+    /// 一覧の下に出す案内（保存できたか、できなかったか）
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) plugin_notice: Option<String>,
     pub(super) show_controls: bool,
     pub(super) camera_fit_token: u64,
     /// 構造に合わせる視点を、まだアプリへ知らせていない分子図
@@ -251,6 +260,8 @@ impl Default for Yui {
         menu::register_builtin_menus(&mut menus);
         #[cfg(not(target_arch = "wasm32"))]
         crate::plugin_menu::register_loaded(&mut commands, &mut menus);
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::plugin_list::register(&mut commands, &mut menus);
 
         Self {
             panes: pane_grid::State::with_configuration(config),
@@ -276,6 +287,12 @@ impl Default for Yui {
             show_right: true,
             show_bottom: true,
             show_about: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            show_plugins: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            plugin_rows: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            plugin_notice: None,
             show_controls: false,
             camera_fit_token: 0,
             fit_pending: std::collections::BTreeSet::new(),
@@ -1916,6 +1933,17 @@ impl Yui {
             layers.push(menu_bar::view_about_modal(Message::MenuAction(
                 MenuAction::CloseAbout,
             )));
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.show_plugins {
+            layers.push(crate::plugin_list::view_plugins_modal(
+                &self.plugin_rows,
+                crate::plugins::plugins_dir().as_deref(),
+                self.plugin_notice.as_deref(),
+                Message::PluginsDialogClose,
+                Message::PluginToggled,
+            ));
         }
 
         if self.show_controls {

@@ -1,0 +1,5 @@
+name: hello-yui
+version: 0.1.0
+api_version: 1
+description: Adds View > Say hello, which writes a line to plugin.log.
+author: YUI project
