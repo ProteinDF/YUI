@@ -1,0 +1,5 @@
+name: atom-info
+version: 0.1.0
+api_version: 1
+description: Adds a right-click item on the viewport that writes the target to plugin.log.
+author: YUI project
