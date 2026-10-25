@@ -29,6 +29,9 @@ mod python_runtime;
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 mod plugins;
+// プラグインのメニューとコマンド（6k-iii）。読み込んだプラグインの項目を、アプリの受け口に入れる
+#[cfg(not(target_arch = "wasm32"))]
+mod plugin_menu;
 mod representation_inspector;
 mod ribbon;
 mod selection;

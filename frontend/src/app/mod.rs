@@ -249,6 +249,8 @@ impl Default for Yui {
         menu::register_menu_commands(&mut commands);
         let mut menus = menu::MenuRegistry::new();
         menu::register_builtin_menus(&mut menus);
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::plugin_menu::register_loaded(&mut commands, &mut menus);
 
         Self {
             panes: pane_grid::State::with_configuration(config),

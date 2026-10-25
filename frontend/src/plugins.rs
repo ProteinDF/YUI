@@ -115,7 +115,10 @@ pub fn load_all(dir: &Path, enabled: &[String]) -> Vec<String> {
             continue;
         }
         match load_one(dir, name, &log) {
-            Ok(version) => append_log(&log, &format!("{name} {version}: loaded")),
+            Ok((version, contribution)) => {
+                append_log(&log, &format!("{name} {version}: loaded"));
+                crate::plugin_menu::record_loaded(contribution);
+            }
             Err(reason) => {
                 append_log(&log, &format!("{name}: failed: {reason}"));
                 warnings.push(format!("plugin {name}: {reason}"));
@@ -125,7 +128,11 @@ pub fn load_all(dir: &Path, enabled: &[String]) -> Vec<String> {
     warnings
 }
 
-fn load_one(dir: &Path, name: &str, log: &Path) -> Result<String, String> {
+fn load_one(
+    dir: &Path,
+    name: &str,
+    log: &Path,
+) -> Result<(String, crate::plugin_menu::Contribution), String> {
     if !valid_name(name) {
         return Err("invalid plugin name".into());
     }
@@ -136,12 +143,12 @@ fn load_one(dir: &Path, name: &str, log: &Path) -> Result<String, String> {
     if !folder.join("__init__.py").is_file() {
         return Err("the package has no __init__.py".into());
     }
-    run_register(&folder, &manifest, log)?;
-    Ok(manifest.version)
+    let contribution = run_register(&folder, &manifest, log)?;
+    Ok((manifest.version, contribution))
 }
 
 /// ログに 1 行足す。書けなくても、読み込みは続ける。
-fn append_log(log: &Path, line: &str) {
+pub(crate) fn append_log(log: &Path, line: &str) {
     if let Some(parent) = log.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -151,12 +158,20 @@ fn append_log(log: &Path, line: &str) {
 }
 
 #[cfg(not(feature = "python"))]
-fn run_register(_folder: &Path, _manifest: &Manifest, _log: &Path) -> Result<(), String> {
+fn run_register(
+    _folder: &Path,
+    _manifest: &Manifest,
+    _log: &Path,
+) -> Result<crate::plugin_menu::Contribution, String> {
     Err("this build has no Python support (build with --features python)".into())
 }
 
 #[cfg(feature = "python")]
-fn run_register(folder: &Path, manifest: &Manifest, log: &Path) -> Result<(), String> {
+fn run_register(
+    folder: &Path,
+    manifest: &Manifest,
+    log: &Path,
+) -> Result<crate::plugin_menu::Contribution, String> {
     let mut host = HOST
         .lock()
         .map_err(|_| "the Python host is unusable".to_string())?;
@@ -170,9 +185,12 @@ fn run_register(folder: &Path, manifest: &Manifest, log: &Path) -> Result<(), St
     wait(runtime.exec(&load_code(folder, &manifest.name, log)))?;
     // 登録の関数で起きた例外は、Python 側で `_yui_plugin_error` に入れてある
     match wait(runtime.eval("_yui_plugin_error"))? {
-        outcome if outcome == "None" => Ok(()),
-        outcome => Err(outcome),
+        outcome if outcome == "None" => {}
+        outcome => return Err(outcome),
     }
+    // 成功したら、登録したコマンドと項目の一覧（JSON）を受け取り、検査する
+    let export = wait(runtime.eval("_yui_plugin_export"))?;
+    crate::plugin_menu::contribution_from_export(&manifest.name, &export)
 }
 
 #[cfg(feature = "python")]
@@ -187,38 +205,97 @@ fn wait(reply: Receiver<Result<String, String>>) -> Result<String, String> {
     }
 }
 
-/// プラグインを読み込む Python のコード。パスと名前は JSON の文字列として埋める（Python の文字列と同じ書き方）。
+/// プラグインのコマンドを、Python の専用スレッドで呼ぶ。返るのは結果の受け口（待つのは呼び出し側）。
+#[cfg(feature = "python")]
+pub fn send_command(
+    id: &str,
+    payload: &serde_json::Value,
+) -> Result<Receiver<Result<String, String>>, String> {
+    let host = HOST
+        .lock()
+        .map_err(|_| "the Python host is unusable".to_string())?;
+    let runtime = host
+        .as_ref()
+        .ok_or_else(|| "the Python host is not running".to_string())?;
+    Ok(runtime.eval(&format!(
+        "_yui_run_plugin_command({}, {})",
+        py_str(id),
+        py_str(&payload.to_string())
+    )))
+}
+
+#[cfg(not(feature = "python"))]
+pub fn send_command(
+    _id: &str,
+    _payload: &serde_json::Value,
+) -> Result<std::sync::mpsc::Receiver<Result<String, String>>, String> {
+    Err("this build has no Python support (build with --features python)".into())
+}
+
+/// Python の文字列の書き方（JSON の文字列は、Python の文字列としても同じに読める）
+fn py_str(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// プラグインを読み込む Python のコード。パスと名前は Python の文字列として埋める。
 #[cfg(feature = "python")]
 fn load_code(folder: &Path, name: &str, log: &Path) -> String {
-    let quote = |text: &str| serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
     let module = name.replace('-', "_");
     let init = folder.join("__init__.py");
     let template = r#"
 import importlib.util as _yui_util
+import json as _yui_json
 import sys as _yui_sys
 _yui_plugin_error = None
+_yui_plugin_export = None
+try:
+    _yui_plugin_commands
+except NameError:
+    _yui_plugin_commands = {}
 class _YuiApp:
     def __init__(self, name, log_path):
         self._name = name
         self._log_path = log_path
+        self._commands = {}
+        self._items = []
     def log(self, message):
         with open(self._log_path, "a", encoding="utf-8") as _f:
             _f.write("[" + self._name + "] " + str(message) + "\n")
+    def add_command(self, command_id, func):
+        if not callable(func):
+            raise TypeError("add_command needs a function")
+        self._commands[str(command_id)] = func
+    def add_menu_item(self, location, order, label, command, args=None):
+        self._items.append({"location": str(location), "order": int(order), "label": str(label), "command": str(command), "args": {} if args is None else args})
+class _YuiContext:
+    def __init__(self, target):
+        self.target = target
+def _yui_run_plugin_command(command_id, payload_text):
+    try:
+        payload = _yui_json.loads(payload_text)
+        func = _yui_plugin_commands[command_id]
+        func(_YuiContext(payload.get("target")), payload.get("args", {}))
+        return ""
+    except Exception as _yui_e:
+        return type(_yui_e).__name__ + ": " + str(_yui_e)
 try:
     _yui_spec = _yui_util.spec_from_file_location("yui_plugin_MODULE", INIT_PATH, submodule_search_locations=[DIR_PATH])
     _yui_module = _yui_util.module_from_spec(_yui_spec)
     _yui_sys.modules[_yui_spec.name] = _yui_module
     _yui_spec.loader.exec_module(_yui_module)
-    _yui_module.register(_YuiApp(NAME_TEXT, LOG_PATH))
+    _yui_app = _YuiApp(NAME_TEXT, LOG_PATH)
+    _yui_module.register(_yui_app)
+    _yui_plugin_export = _yui_json.dumps({"commands": list(_yui_app._commands), "items": _yui_app._items})
+    _yui_plugin_commands.update(_yui_app._commands)
 except Exception as _yui_e:
     _yui_plugin_error = type(_yui_e).__name__ + ": " + str(_yui_e)
 "#;
     template
         .replace("MODULE", &module)
-        .replace("INIT_PATH", &quote(&init.to_string_lossy()))
-        .replace("DIR_PATH", &quote(&folder.to_string_lossy()))
-        .replace("NAME_TEXT", &quote(name))
-        .replace("LOG_PATH", &quote(&log.to_string_lossy()))
+        .replace("INIT_PATH", &py_str(&init.to_string_lossy()))
+        .replace("DIR_PATH", &py_str(&folder.to_string_lossy()))
+        .replace("NAME_TEXT", &py_str(name))
+        .replace("LOG_PATH", &py_str(&log.to_string_lossy()))
 }
 
 #[cfg(test)]
@@ -353,6 +430,55 @@ mod tests {
         assert!(log.contains("good-one 0.1.0: loaded"), "{log}");
         assert!(log.contains("[good-one] from helper"), "{log}");
         assert!(log.contains("broken: failed: RuntimeError: boom"), "{log}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 登録したコマンドを、Python の専用スレッドで実行する。例外は失敗として返り、ログには書かれない。
+    #[cfg(feature = "python")]
+    #[test]
+    fn a_menu_command_runs_on_the_python_thread_and_a_failing_one_reports_it() {
+        let dir = scratch("command");
+        let plugin = dir.join("cmd");
+        fs::create_dir_all(&plugin).unwrap();
+        fs::write(plugin.join("plugin.yaml"), GOOD.replace("sample", "cmd")).unwrap();
+        fs::write(
+            plugin.join("__init__.py"),
+            concat!(
+                "def register(app):\n",
+                "    def say(ctx, args):\n",
+                "        app.log('said ' + str(args['n']) + ' at ' + str(ctx.target['atom_id']))\n",
+                "    def fail(ctx, args):\n",
+                "        raise ValueError('bad')\n",
+                "    app.add_command('plugin.cmd.say', say)\n",
+                "    app.add_command('plugin.cmd.fail', fail)\n",
+                "    app.add_menu_item('menu/view', 500, 'Say', 'plugin.cmd.say', {'n': 7})\n",
+            ),
+        )
+        .unwrap();
+
+        let manifest = parse_manifest(&GOOD.replace("sample", "cmd"), "cmd").unwrap();
+        let log = dir.join(LOG_FILE);
+        let contribution = run_register(&plugin, &manifest, &log).expect("registers");
+        assert_eq!(
+            contribution.commands,
+            vec!["plugin.cmd.say".to_string(), "plugin.cmd.fail".to_string()]
+        );
+        assert_eq!(contribution.items.len(), 1);
+
+        let said = send_command(
+            "plugin.cmd.say",
+            &serde_json::json!({"target": {"kind": "atom", "atom_id": 42}, "args": {"n": 7}}),
+        )
+        .expect("the host runs");
+        let outcome = crate::plugin_menu::command_outcome(said.recv().expect("replies"));
+        assert_eq!(outcome, Ok(()));
+        let text = fs::read_to_string(&log).expect("log written");
+        assert!(text.contains("[cmd] said 7 at 42"), "{text}");
+
+        let failed =
+            send_command("plugin.cmd.fail", &serde_json::json!({})).expect("the host runs");
+        let outcome = crate::plugin_menu::command_outcome(failed.recv().expect("replies"));
+        assert_eq!(outcome, Err("ValueError: bad".to_string()));
         let _ = fs::remove_dir_all(&dir);
     }
 

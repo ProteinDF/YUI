@@ -14,6 +14,10 @@ mod render;
 pub use builtin::{register_builtin_menus, register_menu_commands};
 pub use command::{CommandInvocation, CommandRegistry};
 pub use model::{MenuContext, MenuItem, MenuRegistry, MenuTarget, location};
+// 項目の型は、プラグインのメニュー（ネイティブのみ）が使う
+#[cfg(not(target_arch = "wasm32"))]
+pub use model::{CommandItem, ItemStyle};
+
 pub use render::{Anchor, Surface, popup_menu};
 
 /// 組み込みのメニューの項目を、指定した場所について組み立てる（テスト用の近道）

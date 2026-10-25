@@ -100,6 +100,28 @@ impl Yui {
                     }
                 }
             }
+            Message::PluginCommand {
+                plugin,
+                id,
+                payload,
+            } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                return crate::plugin_menu::run(plugin, id, payload);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (plugin, id, payload);
+                }
+            }
+            Message::PluginCommandDone { plugin, result } => {
+                if let Err(reason) = result {
+                    // 失敗したプラグインは外す（項目が消え、押せなくなる）。アプリは続ける。
+                    #[cfg(not(target_arch = "wasm32"))]
+                    crate::plugin_menu::mark_failed(&plugin, &reason);
+                    self.status_message = Some(StatusMessage::warning(format!(
+                        "Plugin {plugin} failed and was disabled: {reason}"
+                    )));
+                }
+            }
             Message::ViewportCameraChanged { id, camera, fitted } => {
                 self.handle_camera_changed(id, camera, fitted);
             }

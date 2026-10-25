@@ -16,6 +16,17 @@ pub mod location {
     pub const CONTEXT_STRUCTURE_TREE: &str = "context/structure_tree";
     pub const CONTEXT_REPRESENTATION: &str = "context/representation";
     pub const CONTEXT_FILE: &str = "context/file";
+    /// 受け付ける場所の全部（プラグインが `add_menu_item` で指定した場所の検査に使う）
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub const ALL: [&str; 7] = [
+        FILE,
+        VIEW,
+        HELP,
+        CONTEXT_VIEWPORT,
+        CONTEXT_STRUCTURE_TREE,
+        CONTEXT_REPRESENTATION,
+        CONTEXT_FILE,
+    ];
 }
 
 /// 通常の項目（ボタン）の見た目の指定。メニューごとに文字の大きさ・余白が違うので、モデルに持たせる。
