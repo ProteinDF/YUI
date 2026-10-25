@@ -13,6 +13,7 @@
 - アプリの名前を、タイトルとバージョン情報では「YUI」にした。ウィンドウのタイトル、About ダイアログとそのメニュー項目、Web ページのタイトルとバッジ、backend のコンソールの表示、インストーラーの説明、README・ROADMAP・architecture・TESTING の見出しから「結」の字をなくした。ドキュメント本文の「結 (YUI)」の表記は変えていない。
 
 ### 追加
+- View →「Plugins...」で、プラグインのフォルダーにあるプラグインを、版・作者・説明・状態（読み込み済み、有効、無効、理由つきの失敗）とともに一覧できる。有効・無効の切り替えは、`settings.yaml` の `plugins: enabled:` に書き、次の起動から効く。プラグインを書く人向けの手引き（`docs/plugins/plugin-authoring.ja.md`）と、例のプラグイン（`examples/plugins/hello-yui`）を付けた。
 - Python プラグインが、コマンドとメニューの項目を追加できるようにした（`app.add_command`、`app.add_menu_item`）。項目は指定した場所（File・View・Help、右クリックのメニュー）に出る。コマンドが失敗したプラグインは外し、理由をステータスバーと `plugin.log` に出す。`--features python` でビルドしたときだけ使える。
 - `settings.yaml` の `plugins: enabled:` に書いた Python プラグインを、起動時に `<config>/yui/plugins/` から読めるようにした（`--features python` でビルドしたとき）。失敗は、ステータスバーに出し、そのフォルダーの `plugin.log` に書く。
 - アプリのアイコン（`packaging/icons/` の、3 つの原子を結合でつないだ図）を、デスクトップ版のウィンドウのアイコンと、ブラウザ版の favicon に設定した。

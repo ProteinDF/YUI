@@ -4,7 +4,7 @@
 //! アプリのコマンドとメニューの受け口に入れる。押されたコマンドは Python の専用スレッドで動かし、
 //! UI は待たない。コマンドが失敗したプラグインは、以後その項目を出さず、押せなくする（アプリは止めない）。
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use iced::Task;
@@ -95,8 +95,8 @@ pub fn contribution_from_export(plugin: &str, text: &str) -> Result<Contribution
 
 /// 読み込めたプラグインの登録（起動の時に入り、アプリを作るときに受け口へ入る）
 static LOADED: Mutex<Vec<Contribution>> = Mutex::new(Vec::new());
-/// 失敗して、外されたプラグインの名前
-static FAILED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// 失敗して、外されたプラグインと、その理由
+static FAILED: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 pub fn record_loaded(contribution: Contribution) {
     if let Ok(mut loaded) = LOADED.lock() {
@@ -105,13 +105,20 @@ pub fn record_loaded(contribution: Contribution) {
 }
 
 pub fn is_failed(plugin: &str) -> bool {
-    FAILED.lock().is_ok_and(|failed| failed.contains(plugin))
+    FAILED
+        .lock()
+        .is_ok_and(|failed| failed.contains_key(plugin))
+}
+
+/// 実行中に失敗して外されたプラグインの理由（一覧の表示に使う）
+pub fn failure_reason(plugin: &str) -> Option<String> {
+    FAILED.lock().ok()?.get(plugin).cloned()
 }
 
 /// プラグインを失敗にして外す。理由は `plugin.log` に書く（書けなくても外すのは変えない）。
 pub fn mark_failed(plugin: &str, reason: &str) {
     if let Ok(mut failed) = FAILED.lock() {
-        failed.insert(plugin.to_string());
+        failed.insert(plugin.to_string(), reason.to_string());
     }
     if let Some(dir) = crate::plugins::plugins_dir() {
         crate::plugins::append_log(

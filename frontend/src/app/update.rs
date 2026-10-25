@@ -122,6 +122,46 @@ impl Yui {
                     )));
                 }
             }
+            Message::PluginsDialogOpen => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.plugin_rows = crate::plugin_list::rows(
+                        crate::plugins::plugins_dir().as_deref(),
+                        &crate::plugins::configured(),
+                    );
+                    self.plugin_notice = None;
+                    self.show_plugins = true;
+                }
+            }
+            Message::PluginsDialogClose => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.show_plugins = false;
+                }
+            }
+            Message::PluginToggled(name) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    // 設定に書く（次回の起動から効く）。書けなければ、理由を一覧の下に出す。
+                    let names = crate::plugin_list::toggled_names(&self.plugin_rows, &name);
+                    self.plugin_notice =
+                        Some(match crate::user_settings::save_plugins_enabled(&names) {
+                            Ok(()) => {
+                                crate::plugins::set_configured(&names);
+                                "Saved. Restart YUI to apply the change.".to_string()
+                            }
+                            Err(e) => format!("Could not save: {e}"),
+                        });
+                    self.plugin_rows = crate::plugin_list::rows(
+                        crate::plugins::plugins_dir().as_deref(),
+                        &crate::plugins::configured(),
+                    );
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = name;
+                }
+            }
             Message::ViewportCameraChanged { id, camera, fitted } => {
                 self.handle_camera_changed(id, camera, fitted);
             }

@@ -4,12 +4,11 @@
 //! 書かれたものだけを読む。失敗は、そのプラグインだけを外して警告にする（アプリは止まらない）。
 //! 読み込みと失敗は `plugin.log` に書く（Log Viewer で開ける）。
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "python")]
 use std::sync::Mutex;
 #[cfg(feature = "python")]
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -94,8 +93,37 @@ pub fn parse_manifest(text: &str, folder: &str) -> Result<Manifest, String> {
     })
 }
 
+/// 設定に書かれている、有効にしたプラグインの名前（一覧の表示と切り替えに使う）
+static CONFIGURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// 起動のときの読み込みの結果（名前 → 成功なら `Ok`、失敗なら理由）
+static STARTUP: Mutex<BTreeMap<String, Result<(), String>>> = Mutex::new(BTreeMap::new());
+
+/// 設定に書かれている、有効にしたプラグインの名前
+pub fn configured() -> Vec<String> {
+    CONFIGURED.lock().map(|c| c.clone()).unwrap_or_default()
+}
+
+/// 設定を書き換えたあとの、有効にしたプラグインの名前
+pub fn set_configured(names: &[String]) {
+    if let Ok(mut configured) = CONFIGURED.lock() {
+        *configured = names.to_vec();
+    }
+}
+
+/// 起動のときの読み込みの結果。読み込みを試していなければ `None`。
+pub fn startup_result(name: &str) -> Option<Result<(), String>> {
+    STARTUP.lock().ok()?.get(name).cloned()
+}
+
+fn record_startup(name: &str, result: Result<(), String>) {
+    if let Ok(mut startup) = STARTUP.lock() {
+        startup.insert(name.to_string(), result);
+    }
+}
+
 /// 起動時に呼ぶ。読み込めなかったものの理由（警告）を返す。
 pub fn start(enabled: &[String]) -> Vec<String> {
+    set_configured(enabled);
     if enabled.is_empty() {
         return Vec::new();
     }
@@ -118,10 +146,12 @@ pub fn load_all(dir: &Path, enabled: &[String]) -> Vec<String> {
             Ok((version, contribution)) => {
                 append_log(&log, &format!("{name} {version}: loaded"));
                 crate::plugin_menu::record_loaded(contribution);
+                record_startup(name, Ok(()));
             }
             Err(reason) => {
                 append_log(&log, &format!("{name}: failed: {reason}"));
                 warnings.push(format!("plugin {name}: {reason}"));
+                record_startup(name, Err(reason));
             }
         }
     }
@@ -479,6 +509,35 @@ mod tests {
             send_command("plugin.cmd.fail", &serde_json::json!({})).expect("the host runs");
         let outcome = crate::plugin_menu::command_outcome(failed.recv().expect("replies"));
         assert_eq!(outcome, Err("ValueError: bad".to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 同梱のサンプル（`examples/plugins/hello-yui`）が、そのまま読めて、コマンドも動く。
+    #[cfg(feature = "python")]
+    #[test]
+    fn the_example_plugin_loads_and_its_command_runs() {
+        let dir = scratch("example");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/hello-yui");
+        let target = dir.join("hello-yui");
+        fs::create_dir_all(&target).unwrap();
+        for file in ["plugin.yaml", "__init__.py"] {
+            fs::copy(source.join(file), target.join(file))
+                .expect("the example is in the repository");
+        }
+
+        let warnings = load_all(&dir, &["hello-yui".to_string()]);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let reply = send_command(
+            "plugin.hello-yui.say",
+            &serde_json::json!({"target": null, "args": {"greeting": "hi"}}),
+        )
+        .expect("the host runs");
+        assert_eq!(
+            crate::plugin_menu::command_outcome(reply.recv().expect("replies")),
+            Ok(())
+        );
+        let text = fs::read_to_string(dir.join(LOG_FILE)).expect("log written");
+        assert!(text.contains("[hello-yui] hi from the View menu"), "{text}");
         let _ = fs::remove_dir_all(&dir);
     }
 
