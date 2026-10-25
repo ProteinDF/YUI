@@ -174,6 +174,17 @@ pub enum Message {
     MenuAction(MenuAction),
     /// メニューの項目が呼ぶコマンド（登録簿が、既存の操作のメッセージに引き当てる）
     RunCommand(crate::menu::CommandInvocation),
+    /// プラグインのコマンドを、Python の専用スレッドで実行する（`payload` は `{"target", "args"}`）
+    PluginCommand {
+        plugin: String,
+        id: String,
+        payload: serde_json::Value,
+    },
+    /// プラグインのコマンドが終わった。失敗なら理由が入る（そのプラグインは外される）
+    PluginCommandDone {
+        plugin: String,
+        result: Result<(), String>,
+    },
     /// 分子図の視点が変わった（ドラッグ、ホイール、構造に合わせた結果）
     ViewportCameraChanged {
         id: crate::viewport::ViewportId,

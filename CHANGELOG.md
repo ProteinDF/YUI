@@ -13,6 +13,7 @@ and this project adheres to [Calendar Versioning](https://calver.org/) (`YYYY.MM
 - The app is named "YUI" in its titles and version information: the window title, the About dialog and its menu item, the web page title and badge, the backend console messages, the installer description and the README / ROADMAP / architecture / TESTING headings no longer use the 結 character. The name 結 (YUI) in the body text of the documents is unchanged.
 
 ### Added
+- Python plugins can add commands and menu items (`app.add_command`, `app.add_menu_item`). An item appears at the menu location it names (File, View, Help, or a right-click menu). A plugin whose command fails is disabled, and the reason is shown in the status bar and written to `plugin.log`. Available in builds with `--features python`.
 - Python plugins named in `plugins: enabled:` in `settings.yaml` are loaded from `<config>/yui/plugins/` at startup, in builds made with `--features python`. Failures appear in the status bar and are written to `plugin.log` in that folder.
 - The app icon (the three linked atoms in `packaging/icons/`) is now the window icon of the desktop app and the favicon of the browser build.
 - Tabs can be reordered by dragging them within their pane. The tabs of the editor area (3D Viewport and text files) no longer wrap to a second row: they scroll sideways (trackpad, Shift + wheel or the wheel), as in VSCode. The side and bottom panes keep wrapping. Checked on Linux under a virtual display; macOS and the browser (including touch) are not checked.
