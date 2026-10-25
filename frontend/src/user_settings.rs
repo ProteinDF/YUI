@@ -761,14 +761,29 @@ pub fn save_setting(key: &str, value: &str) -> Result<(), String> {
 /// 有効にしたプラグインの一覧を、設定ファイルの `plugins: enabled:` に書く（他の設定とコメントは残す）。
 #[cfg(not(target_arch = "wasm32"))]
 pub fn save_plugins_enabled(names: &[String]) -> Result<(), String> {
-    edit_settings_file(|current| set_plugins_enabled_in_text(current, names))
+    let path = settings_path().ok_or_else(|| "no settings folder on this system".to_string())?;
+    save_plugins_enabled_at(&path, names)
+}
+
+/// `save_plugins_enabled` の、書く先を指定する版（試験で、本物の設定を使わないため）。
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_plugins_enabled_at(path: &std::path::Path, names: &[String]) -> Result<(), String> {
+    edit_settings_file_at(path, |current| set_plugins_enabled_in_text(current, names))
 }
 
 /// 設定ファイルを読み、`edit` で書き換えて書き戻す（ファイルがなければ雛形から作る）。
 #[cfg(not(target_arch = "wasm32"))]
 fn edit_settings_file(edit: impl FnOnce(&str) -> String) -> Result<(), String> {
     let path = settings_path().ok_or_else(|| "no settings folder on this system".to_string())?;
-    let current = match std::fs::read_to_string(&path) {
+    edit_settings_file_at(&path, edit)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn edit_settings_file_at(
+    path: &std::path::Path,
+    edit: impl FnOnce(&str) -> String,
+) -> Result<(), String> {
+    let current = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DEFAULT_SETTINGS_TEMPLATE.to_string(),
         Err(e) => return Err(format!("could not read '{}': {e}", path.display())),
@@ -777,7 +792,7 @@ fn edit_settings_file(edit: impl FnOnce(&str) -> String) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("could not create '{}': {e}", parent.display()))?;
     }
-    std::fs::write(&path, edit(&current))
+    std::fs::write(path, edit(&current))
         .map_err(|e| format!("could not write '{}': {e}", path.display()))
 }
 
@@ -1454,5 +1469,28 @@ mod tests {
         let loaded = parse_settings(&out, "s", &any);
         assert_eq!(loaded.settings.plugins_enabled, names);
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+    }
+
+    /// 書く先を指定して、ファイルに書かれた内容を読み返す（本物の設定には触れない）。
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_save_plugins_enabled_at_writes_only_the_plugins_entry() {
+        let dir = std::env::temp_dir().join(format!("yui-settings-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.yaml");
+        std::fs::write(
+            &path,
+            "# keep\neditor:\n  font_size: 15\nplugins:\n  enabled: [old]\n",
+        )
+        .unwrap();
+
+        save_plugins_enabled_at(&path, &["hello-yui".to_string()]).expect("write");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "# keep\neditor:\n  font_size: 15\nplugins:\n  enabled: [hello-yui]\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -163,7 +163,7 @@ pub fn view_plugins_modal<'a, Message: 'a + Clone>(
     }
 
     let notice_line = notice.map(|n| text(n.to_string()).size(12));
-    let close_btn = button(text("  Close  ").size(13))
+    let close_btn = button(text("Close").size(13))
         .on_press(on_close)
         .padding([4, 16])
         .style(move |_theme, status| ui_style::accent_button_style(&palette, status));
@@ -329,5 +329,109 @@ mod tests {
         let missing = list.iter().find(|r| r.name == "missing").unwrap();
         assert!(matches!(&missing.state, State::Failed(r) if r.contains("no plugin folder")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 画面を開かずに、一覧の画面（モーダル）の部品を試す（`iced_test` で、クリックを再現する）。
+    mod screen {
+        use super::*;
+
+        #[derive(Debug, Clone, PartialEq)]
+        enum Msg {
+            Close,
+            Toggle(String),
+        }
+
+        const NOTICE: &str = "Saved. Restart YUI to apply the change.";
+
+        fn sample_rows() -> Vec<Row> {
+            vec![
+                Row {
+                    name: "broken".into(),
+                    version: String::new(),
+                    author: String::new(),
+                    description: String::new(),
+                    enabled: false,
+                    state: State::Failed(
+                        "plugin.yaml name 'other' does not match its folder 'broken'".into(),
+                    ),
+                },
+                Row {
+                    name: "hello-yui".into(),
+                    version: "0.1.0".into(),
+                    author: "YUI project".into(),
+                    description: "Adds View > Say hello.".into(),
+                    enabled: true,
+                    state: State::Loaded,
+                },
+                Row {
+                    name: "later".into(),
+                    version: "1.0.0".into(),
+                    author: String::new(),
+                    description: String::new(),
+                    enabled: false,
+                    state: State::Disabled,
+                },
+            ]
+        }
+
+        fn modal(rows: &[Row]) -> iced::Element<'_, Msg> {
+            view_plugins_modal(rows, None, Some(NOTICE), Msg::Close, Msg::Toggle)
+        }
+
+        #[test]
+        fn the_list_shows_each_plugin_its_state_and_the_notice() {
+            let rows = sample_rows();
+            let mut ui = iced_test::simulator(modal(&rows));
+            for text in [
+                "hello-yui",
+                "version 0.1.0 · YUI project",
+                "Adds View > Say hello.",
+                "Loaded",
+                "Disabled",
+                "Failed: plugin.yaml name 'other' does not match its folder 'broken'",
+                "Enable",
+                "Disable",
+                NOTICE,
+                "Changes take effect after restart.",
+                "Close",
+            ] {
+                assert!(ui.find(text).is_ok(), "missing on screen: {text}");
+            }
+        }
+
+        #[test]
+        fn pressing_disable_sends_that_plugins_name() {
+            let rows = sample_rows();
+            let mut ui = iced_test::simulator(modal(&rows));
+            ui.click("Disable")
+                .expect("the Disable button is on screen");
+            let messages: Vec<Msg> = ui.into_messages().collect();
+            assert_eq!(messages, vec![Msg::Toggle("hello-yui".into())]);
+        }
+
+        #[test]
+        fn pressing_close_sends_close() {
+            let rows = sample_rows();
+            let mut ui = iced_test::simulator(modal(&rows));
+            ui.click("Close").expect("the Close button is on screen");
+            let messages: Vec<Msg> = ui.into_messages().collect();
+            assert_eq!(messages, vec![Msg::Close]);
+        }
+
+        /// 画像を書く（確認用）。`YUI_UI_SHOTS_DIR` が無いときは何もしない。
+        /// 比べはせず、同じ名前の画像は書き換える。
+        #[test]
+        fn writes_a_picture_of_the_list_for_a_visual_check() {
+            let Ok(dir) = std::env::var("YUI_UI_SHOTS_DIR") else {
+                return;
+            };
+            let rows = sample_rows();
+            let mut ui = iced_test::simulator(modal(&rows));
+            let snapshot = ui.snapshot(&iced::Theme::Dark).expect("take a snapshot");
+            let base = std::path::Path::new(&dir).join("plugin-list");
+            let _ = std::fs::remove_file(base.with_extension("png"));
+            std::fs::create_dir_all(&dir).expect("create the picture folder");
+            snapshot.matches_image(&base).expect("write the picture");
+        }
     }
 }
