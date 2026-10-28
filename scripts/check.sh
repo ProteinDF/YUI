@@ -38,7 +38,19 @@ run() {
 run "cargo check (native)" cargo check --workspace --all-targets
 run "cargo check (wasm32)" cargo check --target wasm32-unknown-unknown -p yui-frontend
 if [[ $quick -eq 0 ]]; then
-    run "cargo test" cargo test --workspace
+    # 出力は画面に流しつつ target/check/ にも残す（失敗したテスト名を後から確かめられるように）
+    mkdir -p target/check
+    echo
+    echo "==> [cargo test] cargo test --workspace (log: target/check/cargo-test.log)"
+    if cargo test --workspace 2>&1 | tee target/check/cargo-test.log; then
+        results+=("PASS  cargo test")
+    else
+        results+=("FAIL  cargo test")
+        failed=1
+        echo
+        echo "--- failing tests (full log: target/check/cargo-test.log) ---"
+        grep -E 'FAILED|panicked|failures:' target/check/cargo-test.log | head -40
+    fi
 fi
 if [[ $no_lint -eq 0 ]]; then
     run "cargo fmt" cargo fmt --all -- --check
