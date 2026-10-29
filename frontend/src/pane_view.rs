@@ -22,14 +22,17 @@ use iced::widget::pane_grid::Axis;
 pub enum PlotKind {
     /// 開発用のサンプル: 原子の座標（x と y）
     AtomPositions,
+    /// 残基ごとの主鎖の二面角（φ と ψ）。点をクリックすると、その残基を選ぶ。
+    Ramachandran,
 }
 
 impl PlotKind {
-    pub const ALL: [PlotKind; 1] = [PlotKind::AtomPositions];
+    pub const ALL: [PlotKind; 2] = [PlotKind::AtomPositions, PlotKind::Ramachandran];
 
     pub fn label(self) -> &'static str {
         match self {
             PlotKind::AtomPositions => "Plot: Atom Positions",
+            PlotKind::Ramachandran => "Ramachandran Plot",
         }
     }
 
@@ -37,6 +40,7 @@ impl PlotKind {
     pub fn as_str(self) -> &'static str {
         match self {
             PlotKind::AtomPositions => "atom_positions",
+            PlotKind::Ramachandran => "ramachandran",
         }
     }
 
@@ -2091,5 +2095,37 @@ mod tests {
             assert_eq!(PlotKind::parse(kind.as_str()), Some(kind));
         }
         assert_eq!(PlotKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn each_plot_kind_has_its_own_tab_and_survives_a_round_trip() {
+        let mut views = default_pane_views();
+        open_plot_tab(&mut views, PlotKind::AtomPositions);
+        open_plot_tab(&mut views, PlotKind::Ramachandran);
+        open_plot_tab(&mut views, PlotKind::Ramachandran);
+        let bottom = &views[&PaneKind::Bottom];
+        let count = |kind| {
+            bottom
+                .views
+                .iter()
+                .filter(|v| **v == ViewId::Plot(kind))
+                .count()
+        };
+        assert_eq!(
+            (
+                count(PlotKind::AtomPositions),
+                count(PlotKind::Ramachandran)
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            bottom.active_view(),
+            Some(ViewId::Plot(PlotKind::Ramachandran))
+        );
+
+        let yaml = serde_yaml::to_string(&views).expect("serialize");
+        assert!(yaml.contains("ramachandran"));
+        let loaded: PaneLayout = serde_yaml::from_str(&yaml).expect("parse");
+        assert_eq!(loaded, views);
     }
 }

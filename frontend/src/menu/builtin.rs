@@ -1220,6 +1220,7 @@ mod tests {
                 "  Link Viewport Cameras",
                 "---",
                 "Plot: Atom Positions",
+                "Ramachandran Plot",
             ]
         );
     }
@@ -1395,6 +1396,7 @@ mod tests {
             ("Split Editor Right", m("ViewToggleEditorSplit")),
             ("Link Viewport Cameras", m("ViewToggleCameraLink")),
             ("Plot: Atom Positions", m("ViewOpenPlot(AtomPositions)")),
+            ("Ramachandran Plot", m("ViewOpenPlot(Ramachandran)")),
             ("Mouse & Keyboard...", m("HelpControls")),
             ("About YUI...", m("HelpAbout")),
         ]);

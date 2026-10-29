@@ -6,10 +6,8 @@
 //! 点が何を指すかは、プロットごとのアダプタ（`PlotAdapter`）だけが知っている。部品は `PlotKey` を解釈せず、
 //! クリックされた点の鍵を `PlotClick` で返す。選択の変え方は 3D Viewport と同じ（`selection::apply`）。
 
-pub mod sample;
-// 段階 3（タブとメニュー）でつなぐまで、使われない
-#[allow(dead_code)]
 pub mod ramachandran;
+pub mod sample;
 pub mod scale;
 
 use std::collections::BTreeSet;
@@ -199,6 +197,7 @@ impl<M> canvas::Program<M> for PlotProgram<'_, M> {
             &self.highlighted,
             &mapping,
         );
+        draw_legend(&mut frame, &palette, &self.data, mapping.rect);
         vec![frame.into_geometry()]
     }
 }
@@ -279,6 +278,35 @@ fn label(
         align_x: align_x.into(),
         align_y,
         ..Text::default()
+    }
+}
+
+/// 系列の凡例（右上。点のある系列が 2 つ以上あるときだけ）
+fn draw_legend(frame: &mut Frame, palette: &UiPalette, data: &PlotData, rect: Rectangle) {
+    let shown: Vec<(usize, &str)> = data
+        .series
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.points.is_empty())
+        .map(|(i, s)| (i, s.name.as_str()))
+        .collect();
+    if shown.len() < 2 {
+        return;
+    }
+    let right = rect.x + rect.width;
+    for (row, (index, name)) in shown.into_iter().enumerate() {
+        let y = rect.y + 12.0 + row as f32 * 16.0;
+        frame.fill(
+            &Path::circle(Point::new(right - 74.0, y), POINT_RADIUS + 1.0),
+            series_color(palette, index),
+        );
+        frame.fill_text(label(
+            name.to_string(),
+            Point::new(right - 64.0, y),
+            palette,
+            alignment::Horizontal::Left,
+            alignment::Vertical::Center,
+        ));
     }
 }
 

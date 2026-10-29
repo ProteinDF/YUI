@@ -2,28 +2,95 @@
 
 use super::Yui;
 use crate::pane_view::PlotKind;
-use crate::plot::{PlotAdapter, sample};
+use crate::plot::{PlotAdapter, ramachandran, sample};
 use crate::selection::{self, ViewportClick};
 use crate::status_bar::StatusMessage;
+use iced::widget::{column, container, text};
+use std::rc::Rc;
+use yui_core::ramachandran::{RamachandranPoint, ramachandran_plot, ramachandran_points};
 use yui_core::selector::Selector;
 
-/// プロットの種類ごとの、点と原子の対応
-fn plot_adapter(kind: PlotKind) -> &'static dyn PlotAdapter {
-    match kind {
-        PlotKind::AtomPositions => &sample::AtomAdapter,
-    }
+/// Ramachandran プロットの点のキャッシュ。`key` が同じ間は、計算し直さない。
+pub(crate) struct RamachandranCache {
+    key: (usize, Option<String>, u32),
+    points: Rc<Vec<RamachandranPoint>>,
 }
 
 impl Yui {
+    /// プロットの種類ごとの、点と原子の対応
+    fn plot_adapter(&self, kind: PlotKind) -> Box<dyn PlotAdapter> {
+        match kind {
+            PlotKind::AtomPositions => Box::new(sample::AtomAdapter),
+            PlotKind::Ramachandran => Box::new(ramachandran::RamachandranAdapter::new(
+                self.ramachandran_points(),
+            )),
+        }
+    }
+
+    /// アクティブなモデルの、残基ごとの φ/ψ。構造（原子の数、モデル、座標）が変わったときだけ作り直す。
+    fn ramachandran_points(&self) -> Rc<Vec<RamachandranPoint>> {
+        let atoms = &self.state.molecule.atoms;
+        // 軌跡の再生で座標が変わるので、座標の和（ビット列）も鍵にする
+        let checksum = atoms.iter().fold(0u32, |acc, a| {
+            a.position
+                .iter()
+                .fold(acc, |acc, v| acc.wrapping_add(v.to_bits()))
+        });
+        let key = (atoms.len(), self.state.active_model.clone(), checksum);
+        let mut cache = self.ramachandran_cache.borrow_mut();
+        if let Some(c) = cache.as_ref().filter(|c| c.key == key) {
+            return Rc::clone(&c.points);
+        }
+        let points = Rc::new(
+            self.state
+                .atom_group
+                .as_ref()
+                .map(|ag| ramachandran_points(ag, self.state.active_model.as_deref()))
+                .unwrap_or_default(),
+        );
+        *cache = Some(RamachandranCache {
+            key,
+            points: Rc::clone(&points),
+        });
+        points
+    }
+
     /// 散布図のタブの中身。データは今の構造から作り、強調する点は今の選択から求める。
     pub(super) fn plot_view(&self, kind: PlotKind) -> iced::Element<'_, super::Message> {
-        let data = match kind {
-            PlotKind::AtomPositions => sample::atom_positions(&self.state.molecule.atoms),
-        };
-        let highlighted = plot_adapter(kind).keys_for(&self.selection);
-        crate::plot::view(data, highlighted, move |click| {
-            super::Message::PlotClicked(kind, click)
-        })
+        let on_click = move |click| super::Message::PlotClicked(kind, click);
+        let highlighted = |adapter: &dyn PlotAdapter| adapter.keys_for(&self.selection);
+        match kind {
+            PlotKind::AtomPositions => {
+                let data = sample::atom_positions(&self.state.molecule.atoms);
+                crate::plot::view(data, highlighted(&sample::AtomAdapter), on_click)
+            }
+            PlotKind::Ramachandran => {
+                let points = self.ramachandran_points();
+                let plot = ramachandran_plot(&points);
+                let note = if points.is_empty() {
+                    "No protein residues to plot".to_string()
+                } else {
+                    format!(
+                        "{} residues plotted, {} without both angles (chain ends and breaks)",
+                        plot.data.point_count(),
+                        plot.unplotted
+                    )
+                };
+                let adapter = ramachandran::RamachandranAdapter::new(points);
+                let chart = crate::plot::view(plot.data, highlighted(&adapter), on_click);
+                column![
+                    chart,
+                    container(
+                        text(note)
+                            .size(12)
+                            .color(crate::ui_style::palette().text_subtle)
+                    )
+                    .padding([0, 8])
+                ]
+                .spacing(4)
+                .into()
+            }
+        }
     }
 
     /// 分子図の左クリックで、選択を変える。
@@ -46,7 +113,8 @@ impl Yui {
 
     /// 散布図のクリックで、選択を変える（3D の選択と同じ状態。修飾キーの扱いも同じ）。
     pub(super) fn handle_plot_clicked(&mut self, kind: PlotKind, click: &crate::plot::PlotClick) {
-        crate::plot::apply_click(&mut self.selection, click, plot_adapter(kind));
+        let adapter = self.plot_adapter(kind);
+        crate::plot::apply_click(&mut self.selection, click, adapter.as_ref());
         self.report_selection();
     }
 
@@ -342,8 +410,124 @@ mod tests {
             false,
             false,
         ));
-        let keys = plot_adapter(PlotKind::AtomPositions).keys_for(&app.selection);
+        let keys = app
+            .plot_adapter(PlotKind::AtomPositions)
+            .keys_for(&app.selection);
         let picked = app.state.molecule.atoms[5].id;
         assert_eq!(keys, [PlotKey(u64::from(picked))].into());
+    }
+
+    /// Ramachandran プロットの点のクリックで残基が選ばれ、3D の選択がプロットの強調になる
+    #[test]
+    fn ramachandran_clicks_select_whole_residues_and_the_selection_highlights_them() {
+        use crate::menu_bar::MenuAction;
+        use crate::plot::PlotClick;
+        use yui_core::ramachandran::plot_key;
+
+        let mut app = app_with_structure();
+        let _ = app.update(Message::MenuAction(MenuAction::ViewOpenPlot(
+            PlotKind::Ramachandran,
+        )));
+        let points = app.ramachandran_points();
+        assert!(points.len() > 40);
+        // 角度が両方そろった残基を 2 つ選ぶ
+        let plotted: Vec<_> = points
+            .iter()
+            .filter(|p| p.phi.is_some() && p.psi.is_some())
+            .take(2)
+            .collect();
+        let click = |key, shift| {
+            Message::PlotClicked(
+                PlotKind::Ramachandran,
+                PlotClick {
+                    key,
+                    shift,
+                    command: false,
+                },
+            )
+        };
+
+        let _ = app.update(click(plot_key(plotted[0]), false));
+        let expected: std::collections::BTreeSet<u32> =
+            plotted[0].atom_ids.iter().copied().collect();
+        assert!(
+            expected.len() > 3,
+            "the whole residue, not only the backbone"
+        );
+        assert_eq!(app.selection, expected);
+
+        let _ = app.update(click(plot_key(plotted[1]), true));
+        assert_eq!(
+            app.selection.len(),
+            plotted[0].atom_ids.len() + plotted[1].atom_ids.len()
+        );
+        let keys = app
+            .plot_adapter(PlotKind::Ramachandran)
+            .keys_for(&app.selection);
+        assert_eq!(
+            keys,
+            [plot_key(plotted[0]), plot_key(plotted[1])]
+                .into_iter()
+                .flatten()
+                .collect()
+        );
+
+        // 3D で原子を 1 つ選ぶと、その残基の点だけが強調される
+        let atom = app.state.molecule.atoms[plotted[1].atom_ids[0] as usize - 1].clone();
+        let _ = app.update(click_on(Some(&atom), false, false, false));
+        let keys = app
+            .plot_adapter(PlotKind::Ramachandran)
+            .keys_for(&app.selection);
+        assert_eq!(keys, plot_key(plotted[1]).into_iter().collect());
+
+        // 何もないところのクリックで、選択が外れる
+        let _ = app.update(click(None, false));
+        assert!(app.selection.is_empty());
+    }
+
+    #[test]
+    fn the_ramachandran_points_are_cached_until_the_structure_changes() {
+        let mut app = app_with_structure();
+        let first = app.ramachandran_points();
+        assert!(Rc::ptr_eq(&first, &app.ramachandran_points()));
+        let _ = app.update(Message::MenuAction(crate::menu_bar::MenuAction::FileNew));
+        assert!(app.ramachandran_points().is_empty());
+        assert!(!Rc::ptr_eq(&first, &app.ramachandran_points()));
+    }
+
+    #[test]
+    fn without_a_structure_the_ramachandran_plot_is_empty() {
+        let app = Yui::default();
+        assert!(app.ramachandran_points().is_empty());
+        let _ = app.plot_view(PlotKind::Ramachandran);
+    }
+
+    /// 実構造の Ramachandran プロットを両方のテーマで描く（`YUI_UI_SHOTS_DIR` があれば、確認用の画像も書く）
+    #[test]
+    fn ramachandran_plot_draws_in_both_themes() {
+        let _gpu = crate::test_gpu::lock();
+        let mut app = app_with_structure();
+        let first = app.ramachandran_points()[3].atom_ids.clone();
+        app.selection = first.into_iter().collect();
+        for (kind, name) in [
+            (crate::ui_style::ThemeKind::Dark, "ramachandran-dark"),
+            (crate::ui_style::ThemeKind::Light, "ramachandran-light"),
+        ] {
+            crate::ui_style::set_theme(kind);
+            let element: iced::Element<'_, Message> =
+                iced::widget::container(app.plot_view(PlotKind::Ramachandran))
+                    .width(480)
+                    .height(360)
+                    .into();
+            let mut ui = iced_test::simulator(element);
+            let snapshot = ui.snapshot(&iced::Theme::Dark).expect("take a snapshot");
+            if let Ok(dir) = std::env::var("YUI_UI_SHOTS_DIR") {
+                let base = std::path::Path::new(&dir).join(name);
+                let _ = std::fs::remove_file(base.with_extension("png"));
+                std::fs::create_dir_all(&dir).expect("create the picture folder");
+                snapshot.matches_image(&base).expect("write the picture");
+            }
+        }
+        crate::ui_style::set_theme(crate::ui_style::ThemeKind::Dark);
     }
 }

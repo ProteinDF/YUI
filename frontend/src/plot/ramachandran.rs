@@ -4,17 +4,18 @@
 //! ここは、クリックされた点から残基の全原子を選び、選ばれている原子から点を強調する対応だけを持つ。
 
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use super::PlotAdapter;
 use yui_core::plot::PlotKey;
 use yui_core::ramachandran::{RamachandranPoint, plot_key};
 
 pub struct RamachandranAdapter {
-    points: Vec<RamachandranPoint>,
+    points: Rc<Vec<RamachandranPoint>>,
 }
 
 impl RamachandranAdapter {
-    pub fn new(points: Vec<RamachandranPoint>) -> Self {
+    pub fn new(points: Rc<Vec<RamachandranPoint>>) -> Self {
         Self { points }
     }
 }
@@ -57,11 +58,11 @@ mod tests {
     }
 
     fn adapter() -> RamachandranAdapter {
-        RamachandranAdapter::new(vec![
+        RamachandranAdapter::new(Rc::new(vec![
             point("1", &[1, 2, 3]),
             point("2", &[4, 5, 6, 7]),
             point("3", &[]),
-        ])
+        ]))
     }
 
     #[test]
