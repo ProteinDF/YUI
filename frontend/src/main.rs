@@ -32,6 +32,8 @@ mod plugins;
 // プラグインのメニューとコマンド（6k-iii）。読み込んだプラグインの項目を、アプリの受け口に入れる
 #[cfg(not(target_arch = "wasm32"))]
 mod plugin_menu;
+#[cfg(not(target_arch = "wasm32"))]
+mod plugin_process;
 // プラグインの一覧（6k-iv）。View → Plugins... で開く
 #[cfg(not(target_arch = "wasm32"))]
 mod plugin_list;

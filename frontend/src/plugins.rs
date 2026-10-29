@@ -30,6 +30,17 @@ const LOAD_WAIT: Duration = Duration::from_secs(5);
 #[cfg(feature = "python")]
 static HOST: Mutex<Option<PythonRuntime>> = Mutex::new(None);
 
+/// プラグインの動かし方（architecture.md §6.4）。`plugin.yaml` の `mode`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)] // 子プロセス版への切り替え（次の段階）で使う
+pub enum PluginMode {
+    /// 長く動く 1 つのプロセス。`register` でコマンドとメニュー項目を宣言する
+    #[default]
+    Resident,
+    /// コマンドを呼ぶたびに、入出力のファイルを渡してプロセスを起動する
+    Oneshot,
+}
+
 /// `plugin.yaml` の内容
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
@@ -39,6 +50,12 @@ pub struct Manifest {
     // 表示は段階 6k-iv（プラグインの一覧）で使う
     pub description: String,
     pub author: String,
+    /// 動かし方（省くと `resident`）
+    #[allow(dead_code)] // 子プロセス版への切り替え（次の段階）で使う
+    pub mode: PluginMode,
+    /// 起動するコマンド（プログラムと引数。シェルは通さない）。省くと空（今の埋め込み版の読み込みだけが動く）
+    #[allow(dead_code)] // 子プロセス版への切り替え（次の段階）で使う
+    pub command: Vec<String>,
 }
 
 /// プラグインを置くフォルダー（`<config>/yui/plugins`）
@@ -84,12 +101,35 @@ pub fn parse_manifest(text: &str, folder: &str) -> Result<Manifest, String> {
             "api_version {api_version} is not supported (this app supports {API_VERSION})"
         ));
     }
+    let mode = match map.get("mode") {
+        None => PluginMode::Resident,
+        Some(serde_yaml::Value::String(s)) if s == "resident" => PluginMode::Resident,
+        Some(serde_yaml::Value::String(s)) if s == "oneshot" => PluginMode::Oneshot,
+        Some(_) => return Err("plugin.yaml 'mode' must be 'resident' or 'oneshot'".into()),
+    };
+    let command_error = || "plugin.yaml 'command' must be a non-empty list of strings".to_string();
+    let command = match map.get("command") {
+        None => Vec::new(),
+        Some(serde_yaml::Value::Sequence(items)) => {
+            let list: Option<Vec<String>> = items
+                .iter()
+                .map(|item| item.as_str().map(str::to_string))
+                .collect();
+            match list {
+                Some(list) if !list.is_empty() => list,
+                _ => return Err(command_error()),
+            }
+        }
+        Some(_) => return Err(command_error()),
+    };
     Ok(Manifest {
         name,
         version,
         api_version,
         description: string("description").unwrap_or_default(),
         author: string("author").unwrap_or_default(),
+        mode,
+        command,
     })
 }
 
@@ -371,6 +411,42 @@ mod tests {
 
         let not_a_mapping = parse_manifest("- a\n- b\n", "sample").unwrap_err();
         assert!(not_a_mapping.contains("mapping"), "{not_a_mapping}");
+    }
+
+    #[test]
+    fn mode_defaults_to_resident_and_command_to_empty() {
+        let m = parse_manifest(GOOD, "sample").expect("valid");
+        assert_eq!(m.mode, PluginMode::Resident);
+        assert!(m.command.is_empty());
+    }
+
+    #[test]
+    fn parses_the_mode_and_the_command() {
+        let text = format!("{GOOD}mode: oneshot\ncommand: [python3, run.py, \"{{input}}\"]\n");
+        let m = parse_manifest(&text, "sample").expect("valid");
+        assert_eq!(m.mode, PluginMode::Oneshot);
+        assert_eq!(m.command, ["python3", "run.py", "{input}"]);
+
+        let resident = format!("{GOOD}mode: resident\n");
+        assert_eq!(
+            parse_manifest(&resident, "sample").unwrap().mode,
+            PluginMode::Resident
+        );
+    }
+
+    #[test]
+    fn rejects_a_wrong_mode_or_command() {
+        let bad_mode = parse_manifest(&format!("{GOOD}mode: daemon\n"), "sample").unwrap_err();
+        assert!(bad_mode.contains("'mode'"), "{bad_mode}");
+
+        for bad in [
+            "command: python3\n",
+            "command: []\n",
+            "command: [python3, 1]\n",
+        ] {
+            let error = parse_manifest(&format!("{GOOD}{bad}"), "sample").unwrap_err();
+            assert!(error.contains("'command'"), "{bad}: {error}");
+        }
     }
 
     /// テスト用の一時フォルダー（テストごとに別の名前）
