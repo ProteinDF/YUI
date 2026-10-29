@@ -175,7 +175,7 @@ Designed in `architecture.md` §6.4: developers outside the project add features
 Graphs of calculation results whose points can be selected in the plot and in the 3D view, and the other way round.
 - **Phase 6l-i — A generic scatter plot with point selection (Complete).** A plot tab in the bottom pane, a plot data type in `core`, and clicking points selects atoms (the same selection as in the 3D view). A development sample (View → "Plot: Atom Positions") uses it; real graphs come with 6l-ii and 6l-iii.
 - **Phase 6l-ii — Graphs from `ProteinDF_pytools`.** Read the plot JSON that `ProteinDF_pytools` writes, link each point to an atom (checked by the number of atoms and their coordinates), and select in both directions. Graphs whose points are not atoms (orbitals, energy levels) come later.
-- **Phase 6l-iii — Ramachandran plot.** Select residues from the φ/ψ plot.
+- **Phase 6l-iii — Ramachandran plot (In progress).** Select residues from the φ/ψ plot. The calculation, the adapter and the tab (View → "Ramachandran Plot") are in; the acceptance check with large structures is left.
 
 ### Phase 7 — QCLObot integration & canonical-MO research features (Not started)
 - Chapter 11 (`.QCLO.yaml` playbook, step playback, bidirectional tree/YAML/3D linking, `modeler.yml` DAG view).

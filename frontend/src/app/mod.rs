@@ -197,6 +197,8 @@ pub struct Yui {
     pub(super) surface_generating: bool,
     /// 再生中に、生成が終わる前に次のフレームへ進んだか（終わったら、最新のモデルでもう一度作る）
     pub(super) surface_follow_pending: bool,
+    /// Ramachandran プロットの点のキャッシュ（構造が変わったときだけ作り直す）
+    pub(super) ramachandran_cache: std::cell::RefCell<Option<selection_ops::RamachandranCache>>,
 
     /// 現在開いている・保存したワークスペースファイルのパス（ネイティブのみ有効）
     pub(super) current_workspace_path: Option<PathBuf>,
@@ -341,6 +343,7 @@ impl Default for Yui {
             surface_generation_tracker: crate::surface_render::SurfaceGenerationTracker::new(),
             surface_generating: false,
             surface_follow_pending: false,
+            ramachandran_cache: std::cell::RefCell::new(None),
             current_workspace_path: None,
             current_workspace_file_name: None,
         }
