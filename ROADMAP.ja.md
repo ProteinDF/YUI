@@ -18,14 +18,14 @@
 
 ---
 
-## 2. 現状（2026-10-03時点）
+## 2. 現状（2026-10-30時点）
 
 | クレート | 状態 | 備考 |
 | --- | --- | --- |
 | `core` | 動作可能（フェーズ1, 5a, 5b-i, 6e, 6i-i, 6i-ii完了） | 状態管理（`state.rs`, `yaml.rs`, `packing.rs`, `trajectory.rs`, `collab.rs`, `role.rs`, `export.rs`, `interaction.rs`）。Rust struct ⇄ MsgPack（非圧縮およびzstd） ⇄ YAML の双方向ロスレス往復テスト済み。フェーズ6eで本物の `proteindf_bridge::AtomGroup` を `rmpv` 経由の手動serdeラッパーで統合。BVH空間分割構造（`spatial.rs`、`AtomBvh`）、構造化データ型 `Representation`（`representation.rs` にて `RepresentationKind::Interaction` および `interaction_kinds` をサポート）、二次構造サイドマップを実装済み。`proteindf-bridge` による実PDB/mmCIFファイルの読み込みを検証完了。 |
 | `core-py` | 動作可能（フェーズ3, 6e完了） | `PyO3` によるネイティブPythonバインディング（`yui-py` cdylib/rlib）。`AppState`, `Selector`, `Representation`, 本物の `AtomGroup` をPythonへ公開。メソッドチェーン（`app.select(...).show(...).color_by(...)`）、型付きセレクタコンストラクタ（`yui.symbol`, `yui.residue_name` 等。裸の文字列は6.2節に従いPathWildcardのみで独自ミニ言語は無し）、ブール結合（`and_`, `or_`, `not_`）、セレクタ原子ID解決、YAML往復を統合テスト済み。 |
 | `backend` | 動作可能（フェーズ4, 6a-i, 6a-ii, 6e, 6f-ii完了） | RESTエンドポイント（`/api/state`, `/api/structure`, `/api/fs/list`, `/api/fs/read`）、`pack_collab_packet`/`unpack_collab_packet` によるWebSocket差分同期（`/api/collab`）（7.3節）、`notify` クレートによるリアルタイムログWebSocket（`/api/logs`）（13.3節）、および `portable-pty` プロセス起動による全二重ターミナルWebSocket（`/api/terminal`）（13.2節）を実装。`RoleResolver`（Host/Editor/Viewer）による権限検証（7.1節）に対応し、ターミナルはHostのみに厳格に限定。LLMプロキシ（14章）はフェーズ6bで対応予定。 |
-| `frontend` | 動作可能（フェーズ2, 4, 5a, 5b-i, 5b-ii, 5b-iii, 6a-i, 6a-ii, 6c-i, 6c-ii, 6d-i..v, 6e, 6f-i..v, 6i-ii完了） | `iced::widget::pane_grid` による4ペインレイアウト。球棒（ball-and-stick）描画、Catmull-Romリボン/カートゥーン表示（4.3節）、非共有結合相互作用（水素結合、塩橋、CH-π、ジスルフィド結合）の破線描画パイプライン（10.2節）、WGSL Compute Shader（`cs_cull`）によるGPU駆動視錐台カリング・atomicコンパクション・`draw_indexed_indirect` 間接描画（4.2節）、段階的LOD（近距離球棒/中距離インポスタークワッド）。Bottomペインのログビューワー・ターミナル（PythonコンソールとAIチャットタブは「Coming soon」プレースホルダ）。TrunkによるWebAssembly (WASM) ビルドパイプライン・ブラウザ内WebGL2/WebGPU描画・WebSocket通信層。メニューバー（File/View/Help）、レイキャスト原子ピッキング、右クリックコンテキストメニュー（8.2〜8.4節）。操作可能な `StructureTree`、`RepresentationInspector`（相互作用トグル対応）、`TextEditor`、プロジェクトディレクトリツリー。ローカルファイルおよびbackend `/api/fs/read` からの実構造ファイルロードに対応。 |
+| `frontend` | 動作可能（フェーズ2, 4, 5a, 5b-i, 5b-ii, 5b-iii, 6a-i, 6a-ii, 6c-i, 6c-ii, 6d-i..v, 6e, 6f-i..v, 6i-ii完了） | `iced::widget::pane_grid` による4ペインレイアウト。球棒（ball-and-stick）描画、Catmull-Romリボン/カートゥーン表示（4.3節）、非共有結合相互作用（水素結合、塩橋、CH-π、ジスルフィド結合）の破線描画パイプライン（10.2節）、WGSL Compute Shader（`cs_cull`）によるGPU駆動視錐台カリング・atomicコンパクション・`draw_indexed_indirect` 間接描画（4.2節）、段階的LOD（近距離球棒/中距離インポスタークワッド）。Bottomペインのログビューワー・ターミナル（PythonコンソールとAIチャットタブは「Coming soon」プレースホルダ）。TrunkによるWebAssembly (WASM) ビルドパイプライン・ブラウザ内WebGL2/WebGPU描画・WebSocket通信層。メニューバー（File/View/Help）、レイキャスト原子ピッキング、右クリックコンテキストメニュー（8.2〜8.4節）。操作可能な `StructureTree`、`RepresentationInspector`（相互作用トグル対応）、`TextEditor`、プロジェクトディレクトリツリー。ローカルファイルおよびbackend `/api/fs/read` からの実構造ファイルロードに対応。Python プラグイン（フェーズ6k）: プラグインは、YUI が起動する別のプロセスとして動く（YUI が同梱する Python のランナー、または msgpack のプロトコルを話す任意のプログラム）。動かし続ける方式と、コマンドごとに起動し直す方式があり、View → Plugins... にプラグインの一覧がある。 |
 | `renderer-native` | スケルトンのみ | 約30行。YAML状態ファイルの読み込み確認のみ。 |
 | `proteindf-bridge` | `core` へ統合済み（フェーズ6e完了、フェーズ6gで可搬化完了） | 本物の `proteindf-bridge` を `AtomGroup`、`Bond::setup()`、PDB/mmCIFパーサ、DSSP二次構造推定に統合済み。upstreamリリースタグ `2026.10.1`（`AtomGroup::setup()` §3.14 および mmCIF 書き出しを含む）に固定。ターゲット別feature制御（native: `zstd`, wasm32: `ruzstd`）。残るupstream要件: Gaussian CUBEパーサ、`ProteinDF_pytools`統合（HDF5, Mulliken）。 |
 
@@ -37,26 +37,26 @@
 
 各フェーズは、`architecture.md` 自体が採用している積み上げ順（基礎的な章を先に、応用・付加価値的な機能を後に）と同じ依存関係の順序で並べている。各フェーズは1つの巨大なcommitではなく、レビュー可能な単位の複数の変更に分けて進めること。
 
-### フェーズ1 — `core` の堅牢化 + ローカルな `AtomGroup`/`Selector` 代替実装
+### フェーズ1 — `core` の堅牢化 + ローカルな `AtomGroup`/`Selector` 代替実装（完了）
 - `core` の `AppState` を2.1節（Rust struct ⇄ MessagePack ⇄ YAML のロスレス相互変換）に適合させ、各変換方向のテストを追加する。
 - 最小限のローカルな `AtomGroup`（鎖→残基→原子の木構造、2.2節）と、`Select_*` 述語群＋`And`/`Or`/`Not`（6.2.1節）を備えた `Selector` を、**当面は `core` 内に**、`proteindf-bridge` の一時的な代替であることを明記した上で追加する。PDB/mmCIF等のフォーマットパーサはここでは作り込まない（それは `proteindf-bridge` の管轄）。描画/UI作業のブロックを解消できる程度の、手組みまたは単純なテスト用フィクスチャで十分。
 - `Representation`（6.2.2節）を `AppState` 内の構造化データ型として追加する。
 
-### フェーズ2 — `frontend` MVP: 目に見える描画
+### フェーズ2 — `frontend` MVP: 目に見える描画（完了）
 - 8章のLeft/Center/Right/Bottomレイアウトに沿った `iced::widget::pane_grid` スケルトン（Center以外はプレースホルダで可）。
 - フェーズ1の代替構造体を、ネットワーク接続なしでネイティブに描画する、ball-and-stick（4.1節）の `wgpu` ジオメトリインスタンシング。
 - ゴール: 「小さな構造を読み込み、描画され、カメラを回転・ズームできる」というデモ可能なマイルストーン。
 
-### フェーズ3 — スクリプティング基盤
+### フェーズ3 — スクリプティング基盤（完了）
 - 6.1節に沿って `Selector`/`Representation` を公開する `PyO3` ネイティブバインディング（`yui.select(...).show(...).color_by(...)`）。
 - これにより、後続のQCLObot連携（11章）とAIチャットアシスタントのツール呼び出し（14.3節）の両方が、新規言語ではなく同一のPython API上で定義できるようになり、道が開ける。
 
-### フェーズ4 — `backend` の配線: 構造I/O + 差分同期 + ロール
+### フェーズ4 — `backend` の配線: 構造I/O + 差分同期 + ロール（完了）
 - 構造データのアップロード/取得用RESTエンドポイント、`rmp-serde` を用いた `AppState` 変更の差分同期WebSocket（7.3節）。
 - `CollabTransport` トレイト（7.2節）と `WebSocketTransport` 実装、Host/Editor/Viewerモデル（7.1節）に沿った `RoleToken` 検証。
 - `frontend` がローカルファイルI/Oの代わりに（あるいはそれに加えて）このチャンネル経由で `backend` を利用するよう配線する。
 
-### フェーズ5 — スケールアウト描画（完全な忠実度は `proteindf-bridge` 待ち）
+### フェーズ5 — スケールアウト描画（完全な忠実度は `proteindf-bridge` 待ち）（5a、5b、5c-i、5c-ii、5c-iv は完了。5c-iii は未着手）
 
 フェーズ5は範囲が広い（4.2〜4.5節）ため、それぞれ独立してレビュー可能な3つのサブフェーズに分割する:
 
@@ -74,7 +74,7 @@
 
 3つのサブフェーズいずれも、実際のタンパク質データに対しては `proteindf-bridge`（10章、10.1節）由来の二次構造ラベルと堅牢な大規模構造パースが必要。フェーズ1の代替実装に対しては合成/テストデータでまず実装し、`proteindf-bridge` が揃った時点で再検証する。
 
-### フェーズ6 — ターミナル & ログビューワー、AIチャットアシスタント
+### フェーズ6 — ターミナル & ログビューワー、AIチャットアシスタント（6a は完了。6b は未着手）
 
 これらはすでに機能している可視化＋スクリプティング基盤の上に載る付加的なUI機能である。アクセス制御・ツール呼び出しの設計がロールモデル（7.1節）とPython API（6章）の存在を前提としているため、フェーズ1〜4が機能する前に着手しないこと（この前提条件はフェーズ4完了時点で既に満たされている）。13章と14章は機能的に独立しているため、2つのサブフェーズに分割する:
 
@@ -83,7 +83,7 @@
   - **フェーズ6a-ii — ターミナル（完了）。** `backend` 側でホストする `portable-pty` によるシェル子プロセス起動と全二重ストリーミング（`/api/terminal` WebSocket）。ANSI/VT状態機械は `vt100` クレートを採用（C依存ゼロ、純粋インメモリ、WASM互換性から `alacritty_terminal` より選定）。等幅フォント、カーソル強調、クイック制御キーボタンを備えたカスタム `iced` ターミナルペインウィジェット。`RoleResolver` により厳格に Host ロール（role_token=1）のみに限定。
 - **フェーズ6b — AIチャットアシスタント（14章）。** Claude/Gemini/Ollamaを差し替え可能にする `LlmProvider` 抽象、チャットパネル、フェーズ3のPython APIへのツール呼び出し、状態ダイジェストによるコンテキスト付与。6aの後に行う。着手前の留意点: 実際のエンドツーエンド検証には本物のAPIキー（Claude/Gemini）またはローカルOllama環境のいずれかが必要になる。HTTP応答をモックしたテストのみとするか、実際の認証情報を用意するかを事前に決めておくこと（これによって本サブフェーズの「完了」の定義が実質的に変わるため）。
 
-### フェーズ6c — WASM/Webフロントエンド対応
+### フェーズ6c — WASM/Webフロントエンド対応（完了）
 
 `frontend`はこれまで全フェーズを通じてネイティブ版のみであり、1.1節はWASM互換性を目標として掲げているものの、実際にブラウザビルドを試みたフェーズは無い。既存のwgpu/`iced::widget::shader`ベースの描画（Compute Shaderカリング、ビルボードインポスター、カスタムのリボン/ターミナルパイプライン）がそもそもブラウザ上で動くのかどうかが最大の未知数であるため、通信部分に着手する前にまずそれを検証する:
 
@@ -92,7 +92,7 @@
 
 実際にビルド済みWASMバンドルを配信・配布する部分は、引き続きフェーズ8（9章）の範囲とする。6c は機能することの証明に留める。
 
-### フェーズ6d — メニューバー & コンテキストメニュー（8.2〜8.4節、新設）
+### フェーズ6d — メニューバー & コンテキストメニュー（8.2〜8.4節、新設）（完了）
 
 既に機能している可視化＋スクリプティング基盤以外に前提条件は無い。現状Pythonコンソール経由か固定の既定値でしか到達できない操作に、発見しやすいUIを追加する。既存仕様の実装ではなく新規に設計したUI領域（8章はこれまで3つの簡潔な箇条書きしか無かった）であるため、「今すぐ作れるもの」と「先に別のウィジェットを作る必要があるもの」で分割する — LeftペインとRightペインは現状プレースホルダーのテキストであり、操作可能なウィジェットではない:
 
@@ -104,7 +104,7 @@
 
 5つのサブフェーズいずれも、そのアクションはスクリプティング層と同じ`Selector`/`Representation`のPython API相当の呼び出し経由で処理すること（8.4節）— メニュー/コンテキストメニュー専用のコマンド経路は作らない。これは新規DSL禁止ルール（6.2節）と整合する。
 
-### フェーズ6e — ローカルな`AtomGroup`/`Selector`代替実装を本物の`proteindf-bridge`に置き換える（フェーズ5cとフェーズ7のブロッカー解消）
+### フェーズ6e — ローカルな`AtomGroup`/`Selector`代替実装を本物の`proteindf-bridge`に置き換える（フェーズ5cとフェーズ7のブロッカー解消）（完了）
 2026-09-19に調査: これは元々予定されていたことだった（`core/src/atom_group.rs`と`selector.rs`は「proteindf-bridgeが実装されるまでの一時的なローカル代替」と最初から明記されている）。実際の`proteindf-bridge`には既に、動作確認済みでドキュメント化された「protein schema」規約（`/model_N/chain_id/res_key/atom_key`というパスの深さによる規約。本リポジトリの型付き`Model → Chain → Residue → AtomRecord`と完全に対応する）と、`Bond::setup()`というVDW半径ベースの結合検出器が存在する — したがって結合生成は完全にproteindf-bridge側の責務であり、本リポジトリは利用するだけで検出ロジックを独自実装しない（10章）。変換用のアダプタ層ではなく型そのものの置き換えが正しい形だが、影響範囲は実際に大きい: `.models`/`.chains`/`.residues`/`.atoms`という型付きフィールドを直接読んでいるファイルが14個ある（`core/src/{selector,atom_group,packing,spatial,export}.rs`、`core-py/src/{state,atom_group}.rs`、`frontend/src/{ribbon,structure_tree,menu_bar,state_sync,viewport}.rs`、`backend/src/main.rs`、`renderer-native/src/main.rs`）ため、1つのPRにまとめず依存関係順にサブフェーズへ分割する。本物の`atom_group`データを含む`state.yaml`/MessagePackとの後方互換性は失われる — `#[serde(default)]`では型の完全な置き換えを吸収できないため、6e-viiで`AppState.version`に初めて実際の意味（「未対応/旧形式」への明確なエラー）を持たせる必要がある。
 
 **ブランチ運用の例外（2026-09-19、6e-iiのレビュー中に決定）:** 基本ルール§1は、あらゆる
@@ -129,7 +129,7 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 - **フェーズ6e-vi (完了) — 本物の結合生成を配線する**: `to_flat_molecule()`内で`proteindf_bridge::Bond::setup()`（下記のbridge側スケーラビリティ要求が先に対応されていれば、その空間分割対応版）を呼び、`Molecule.bonds`に反映する。`frontend/src/viewport.rs`を、`Molecule.bonds`が非空ならそちらを優先し、空なら既存の`AtomBvh::query_pairs_within_range`幾何ヒューリスティックにフォールバックするよう切り替える。
 - **フェーズ6e-vii (完了) — フォーマット破壊への対応と実データでの検証。** `AppState.version`に、暗号めいたserdeエラーの代わりに「未対応/旧形式の`atom_group`」への明確なエラー経路を持たせる。6e-iiの深さ規約の前提を、本リポジトリの合成フィクスチャだけでなく、`proteindf-bridge`の実際のパーサで読み込んだ最低1件の実PDB/mmCIFファイルに対して検証する（proteindf-bridge側にはこの規約を強制する仕組みが何もないため。下記のbridge側要求リストを参照）。`architecture.md`/`architecture.ja.md`の2章を、代替実装ではなく本物の`AtomGroup`型を説明する内容に更新する。
 
-### フェーズ6f — VSCode風プロジェクトエクスプローラと汎用テキストエディタ
+### フェーズ6f — VSCode風プロジェクトエクスプローラと汎用テキストエディタ（完了）
 `architecture.md` 1.1節では、フェーズ6d-iiiでペインの表示内容をランタイムの`ViewId`へ一般化した際に、既に「将来的なビュー（スクリプトエディタ等）」への拡張が想定されていた。本フェーズでそれを実際に実装する: 選択したプロジェクトディレクトリをツリー表示し（既存のLeftペイン「Explorer / Playbook」タブ列を再利用）、選択したファイルをそのファイルに適したビューアで開く — 既定は新設の汎用テキストエディタだが、拡張子が既存の構造/状態ビューアと合致する場合はそちらを使い、複数候補がある場合はユーザーが選べるようにする。各PRをレビュー可能な粒度に保つため、依存順にサブフェーズへ分割する。
 
 **着手前に見つかった設計上の訂正（2026-09-23）:** 当初の分割案は、単一ファイルのOpen/Saveと同様、`rfd::AsyncFileDialog`だけでディレクトリの「中身の列挙」もカバーできると誤って想定していた。実際にはwasm32上の`pick_folder()`が返す`FileHandle`は不透明な参照に過ぎず、`path()`自体が存在せず（rfd自身のドキュメントに"does not exist in WASM32"と明記）、中身を列挙する手段も提供されない。ブラウザ側で実際に列挙するにはFile System Access APIが必要だが、これはFirefox・Safariが全く実装しておらず（2026年9月時点でChromium系限定を確認済み）、クロスブラウザなツリーとしては行き止まりだった。**解決策: ブラウザのローカルファイルシステムではなく、既存の`backend`サーバー経由でディレクトリを閲覧する。** `backend`は元々ネイティブな`std::fs`に自由にアクセスできる上、ログストリーミング機能で`YUI_LOG_ROOT`という環境変数スコープ方式の前例が既にある。同じ考え方で新設する`YUI_WORKSPACE_ROOT`を土台に、そのルート配下を返すRESTエンドポイントを1つ用意すれば、ネイティブ・wasm32どちらのクライアントも（本アプリの他のREST/collab通信と同様に）単なるHTTPリクエストとして同一に扱え、ブラウザAPIの制約を恒久的な制約として受け入れる必要が無くなる。ネイティブビルドは、backend未接続のスタンドアロン利用のために`rfd::pick_folder()`＋ローカル`std::fs`によるフォールバックも維持する。また、「構造ファイルは既存の3Dビューポート/`AtomGroup`読み込みパイプラインへルーティング」という記述も、実は存在しないものを前提にしていたことが判明した — 実PDB/mmCIFファイルを`AtomGroup`に読み込むコードは`core/tests/real_pdb_validation.rs`（テスト専用）にしか存在せず、実行中のアプリからは一度も到達可能になったことがない。これをディスパッチフェーズの暗黙の前提とせず、独立した小さなサブフェーズとして切り出す。
@@ -140,18 +140,18 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 - **フェーズ6f-iv (完了) — 実構造ファイルを`AppState`へ読み込む。** `proteindf_bridge`のPDB/mmCIFローダー（`Pdb::from_file()` → `get_atomgroup()` → `AtomGroup::setup()`、`core/tests/real_pdb_validation.rs`が既にテストで使っているのと同じパイプライン）を、ファイルのバイト列（ローカルパスからでも、6f-iiの`/api/fs/read`レスポンスからでも良い）を受け取って`AppState.atom_group`/`secondary_structure_map`を設定し`sync_molecule_from_atom_group()`を呼ぶ、アプリから到達可能な関数として配線する。現状このパスは実行中のUIから一度も到達可能になったことがなく、合成フィクスチャしかロードされたことがない。今回はUI入口は作らず、6f-vから呼び出される形にする。
 - **フェーズ6f-v (完了) — 「開き方」ディスパッチ。** 6f-iiiで選択されたファイルを拡張子ごとにハンドラへ振り分ける: 構造ファイル（`.pdb`/`.cif`/`.mol2`等）は既定で6f-ivのローダーへ、それ以外は6f-iのテキストエディタへ。1つの拡張子に複数のハンドラが当てはまり得る場合（例: `.yaml`はワークスペース`state.yaml`のインポートとしても、単なるテキストとしても開ける）は、ユーザーが既定を上書きできる選択UIを用意する。
 
-### フェーズ6g — ビルド環境の可搬化と初回リリース
+### フェーズ6g — ビルド環境の可搬化と初回リリース（完了）
 - **フェーズ6g-i (完了) — proteindf-bridge 依存の可搬化。** 相対パス依存 `../../ProteinDF_bridge/rust/crates/proteindf-bridge` を、rev `997ad2478e8681ce2d55ff381feaa759b3395490` 固定のHTTPS Git依存へ変更し、ターゲット別featureゲート（native: `zstd`, wasm32: `ruzstd`）を維持する。実テスト構造（`1hls.pdb`, `1HLS.cif`）を `core/tests/data/` に配置し、出典READMEを整備する。外部の `~/.cargo/config.toml` による `[patch]` 上書きに対応する。
 - **フェーズ6g-ii (完了) — ドキュメントおよびロードマップ同期。** `ROADMAP.md`/`ROADMAP.ja.md` の2章現状表および3章フェーズ計画を、完了済みフェーズと今後の優先度に合わせて最新化する。
 - **フェーズ6g-iii (完了) — 初回リリース `release/2026.10.0`。** `release/2026.10.0` ブランチを作成し、バージョン番号の更新、チェックゲート全通過の確認を経て、git-flowに従いCalVerタグ付きで `main` へリリース・マージする。
 
-### フェーズ6h — Python コンソール
+### フェーズ6h — Python コンソール（未着手。フェーズ6k で埋め込みの Python を削除したので、方式を決め直す）
 （※2026-10-03 ユーザー判断により、非共有結合相互作用の可視化（フェーズ6i）を優先するため後回しとした）
 現在Bottomペインの「Python Console」タブは「Coming soon」プレースホルダ表示となっている。本フェーズでインタラクティブなPython評価環境を実装し、AIチャットのツール呼び出し（フェーズ6b）やインタラクティブなQCLObot解析（フェーズ7）の土台を整える:
 - **フェーズ6h-i — ネイティブ版Pythonコンソール（埋め込みPyO3）。** ネイティブプロセス内で動作するインタラクティブなPyO3 REPLをBottomペインに実装し、`yui` モジュールおよびアクティブな `AppState` への直接操作を提供する。
 - **フェーズ6h-ii — WASM版Pythonコンソール（Pyodide）。** Pyodideによるブラウザ内WebAssembly Python REPLを実装し、Web配信環境でもネイティブと同等のスクリプティング体験を提供する。
 
-### フェーズ6i — 非共有結合相互作用の可視化
+### フェーズ6i — 非共有結合相互作用の可視化（完了）
 `proteindf-bridge` の `InteractionSet`（水素結合、CH-π、イオン対、ジスルフィド結合）を、3Dビューポート上に破線ジオメトリコネクタおよび選択可能な `Representation` として直接描画する。
 - **フェーズ6i-i (完了) — 読み込み時の検出と保存・端点導出（core 側）。** 構造読み込み時にモデルごとに `detect_all` を呼び出して `AppState.interactions` に保存し、描画に必要な両端の3D座標（`resolve_interaction_endpoints`）および選択フィルタ用の原子ID集合（`resolve_interaction_atom_ids`）を解決する。1HLS実データ（PDB/mmCIF）を用いたジスルフィド結合・水素結合・CH-π・塩橋の統合テストおよび往復シリアライズテストを整備。
 - **フェーズ6i-ii (完了) — frontend での破線描画と Representation 連携。** 3Dビューポートでの破線コネクタ描画パイプラインを実装し、`Representation` の `kind: Interaction` から表示・フィルタリングを切り替え可能にする。
@@ -162,7 +162,7 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 - **フェーズ6j-ii (完了。Chrome で確認) — ランダムな秘密、渡し方、バインド。** 起動時のランダムな Host の秘密（`YUI_TOKEN` で上書き）、文字列を解決する `RoleResolver`（`TokenStore`）、接続に結びつけたロール、すべての `/api/` の認証、`Authorization: Bearer` / WebSocket のサブプロトコルでの秘密（チケットの API はなし。ヘッダーで、すでに URL から外せる）、`backend.json` / `--token` / `#token=` での受け渡し、TLS プロキシの宣言とターミナル・ファイルの門つきの `YUI_BIND`。
 - **フェーズ6j-iii (完了) — 招待と乱用の制限。** 期限つきで取り消せる Editor / Viewer の秘密のための `POST/GET /api/invites` と `DELETE /api/invites/{id}`（開いている接続は、取り消しですぐ、期限切れは期限の時刻に閉じる）、`scripts/yui-invite.py`、接続元ごとの締め出し（60 秒の間に 10 回失敗すると、60 秒の 429）。アプリには、招待を作り、一覧し、取り消す **File → Share Session...** がある。
 
-### フェーズ6k — Python プラグイン
+### フェーズ6k — Python プラグイン（完了）
 `architecture.ja.md` 6.4節に設計した: プロジェクトの外の開発者が Python で機能を足す。YUI が起動する別のプロセスで動かす（標準入出力で msgpack のメッセージをやり取りする。ブラウザー版には当面プラグインはない）。ネイティブ版では完了（6k-i から 6k-vi）。まだ: `pip` / entry points、`numpy` などの外部パッケージ、Log Viewer での `plugin.log` の自動表示。
 - **フェーズ6k-i — 組み込みの Python の基盤（完了。6k-v で置き換えた）。** 最初の版は、アプリの中で CPython を動かした（`frontend` の feature `python`、UI スレッドとチャネルでつながる Python のスレッド）。これは削除した。Python コンソール（フェーズ6h-i）は、別に決める必要がある（6.4節）。
 - **フェーズ6k-ii — プラグインの読み込み（完了。失敗はステータスバーと `plugin.log` に出す。Log Viewer にはまだ出さない）。** `plugin.yaml` と `register(app)` を置く `<config>/yui/plugins/<name>/`、`api_version` の確認、`settings.yaml` の `plugins.enabled`（有効にするまで動かさない）、失敗のステータスバーと Log Viewer への表示。この段階の前に、`pip` / entry points にも対応するかを決める。
@@ -171,19 +171,25 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 - **フェーズ6k-v — プラグインを別のプロセスで動かす（`resident` は完了）。** メッセージのプロトコル（長さ付きの msgpack）、YUI が起動・終了する子プロセス、何も入れなくてよい Python のランナー（`msgpack` のパッケージがあればそれを使う）、`settings.yaml` の `plugins.python`、`plugin.yaml` の `mode` と `command`。`--features python` は要らなくなった。
 - **フェーズ6k-vi — `oneshot` の方式（完了）。** コマンドを呼ぶたびに新しいプロセスを起動する。メニュー項目とコマンドは `plugin.yaml` に書く（`menu_items`、`commands`）。入力と出力は msgpack のファイル（`{input}`、`{output}`）。Python のパッケージは、ランナーで `register(app)` のまま書ける。1 回の失敗でプラグインは外さない。Python 以外の言語向けのプロトコルの手引き（`docs/plugins/plugin-protocol.ja.md`）と、例（`examples/protocol/raw-python`）。
 
-### フェーズ7 — QCLObot連携 & 正準MO可視化研究支援機能
+### フェーズ6l — グラフと 3D 表示の連動（計画）
+計算結果のグラフで、グラフの点を選ぶと 3D 表示でも選ばれ、その逆もできるようにする。
+- **フェーズ6l-i — 汎用の散布図と、点の選択。** 下のペインのグラフのタブ、`core` のグラフのデータ型、点のクリックで原子を選ぶ（3D 表示と同じ選択）。
+- **フェーズ6l-ii — `ProteinDF_pytools` のグラフ。** `ProteinDF_pytools` が書くグラフの JSON を読み、点を原子に結びつけ（原子の数と座標で確かめる）、両方向に選べるようにする。点が原子でないグラフ（軌道、エネルギー準位）は、あとで扱う。
+- **フェーズ6l-iii — Ramachandran プロット。** φ/ψ のプロットから残基を選ぶ。
+
+### フェーズ7 — QCLObot連携 & 正準MO可視化研究支援機能（未着手）
 - 11章（`.QCLO.yaml` プレイブック、ステップ再生、ツリー/YAML本文/3Dビューの双方向リンク、`modeler.yml` のDAG表示）。
 - 12章（MOブラウザ、軌道別寄与マッピング、QCLO収束ビュー、複数計算の比較表示）。
 - `proteindf-bridge` の `ProteinDF_pytools` 統合（HDF5読み込み、Mulliken寄与計算、行列演算 — 10章）が利用可能であることが前提。姉妹プロジェクトへの依存度が最も深いフェーズ。
 
-### フェーズ8 — 論文品質出力 & 配布
+### フェーズ8 — 論文品質出力 & 配布（進行中）
 - SSAO/パストレースによるオフラインレンダリング（4.7節）、SVGベクターエクスポート（4.6節）。ここまでに済んだもの: SSAO（オプション。`render.ssao_strength`、既定はオフ。4.7節のフェーズA）、File →「Export Image (SVG)」（原子、結合、相互作用の線、リボン、分子表面）と、File →「Export Image (PNG)」（ビュー全体。幅・なめらかさ・背景透明のダイアログつき。4.6節）。File →「Export Animation」（連番の PNG と、ffmpeg 経由の MP4。回転・首振り・モデルや軌跡のフレーム。デスクトップ版のみ）。Web 版の配備は、ローカルでの利用について対応済み（`scripts/build-web.sh`。backend が `YUI_WEB_ROOT` で配信する。backend の認証ができるまで、ネットワークへの公開は対象外）。ネイティブのインストーラーは、署名なしで対応済み（`scripts/build-installers.sh`、手動実行のワークフロー `release-installers.yml`: Linux は deb と AppImage、macOS は dmg、Windows は NSIS の exe。ここで作って起動を確かめたのは Linux だけ）。ブラウザ版のアニメーションの書き出しは、PNG のフレームの zip として対応済み（メモリに溜める経路と zip は、デスクトップの描画器で動かした。実際のブラウザでの経路は、動かしていない）。まだ: 署名と公証、Windows の msi（カレンダーバージョンが MSI のバージョンの規則に合わない）、rpm。
 - ネイティブインストーラ、およびフェーズ6cで得られたWASM `frontend` ビルドの配信・配布（9章）。
 
 ---
 
 ### 推奨着手順
-`6g → 6i → 6b → 5c → 7 → 8`
+完了: `6g → 6i → 5c（5c-iii を除く）→ 6j → 6k`。次: `6l`（グラフと 3D 表示の連動）、続いて Python コンソール（`6h`。方式を決め直してから）、AI チャット（`6b`）、`7`、`8`。`7` は `proteindf-bridge` 待ち。`5c-iii`（表面の抽出の GPU への移植）と、描画の間引きの第 3 段（遠距離は表面だけ）は、いつでもできる。
 
 ### proteindf-bridge 側への依頼事項
 - **Gaussian CUBEパーサ（提供済み）:** `proteindf-bridge` 2026.10.5 にあり、フェーズ5c-ivが使っている。実際の ProteinDF の CUBE は、まだ試していない。

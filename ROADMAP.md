@@ -18,14 +18,14 @@ This document is a handoff brief for whoever (a human contributor or an AI codin
 
 ---
 
-## 2. Current State (as of 2026-10-03)
+## 2. Current State (as of 2026-10-30)
 
 | Crate | Status | Notes |
 | --- | --- | --- |
 | `core` | Functional (Phases 1, 5a, 5b-i, 6e, 6i-i, 6i-ii complete) | State management (`state.rs`, `yaml.rs`, `packing.rs`, `trajectory.rs`, `collab.rs`, `role.rs`, `export.rs`, `interaction.rs`). Lossless round-trip tested across Struct ⇄ MsgPack (uncompressed & zstd) ⇄ YAML. Real `proteindf_bridge::AtomGroup` integrated with custom serde wrapper via `rmpv` (Phase 6e), spatial partitioning BVH (`spatial.rs` with `Aabb` and `AtomBvh` dual-tree range pair queries), structured `Representation` (`representation.rs` with `RepresentationKind::Interaction` and `interaction_kinds`), and secondary structure side-map. Real structure loading from PDB/mmCIF via `proteindf-bridge` verified. |
 | `core-py` | Functional (Phases 3, 6e complete) | PyO3 native bindings (`yui-py` cdylib/rlib) exposing `AppState`, `Selector`, `Representation`, and real `AtomGroup`. Fluent method chaining (`app.select(...).show(...).color_by(...)`), typed selector constructors (`yui.symbol`, `yui.residue_name`, etc. — bare strings are `PathWildcard` only, no query mini-language per §6.2), boolean combinators (`and_`, `or_`, `not_`), atom ID resolution, and YAML round-trip tested. |
 | `backend` | Functional (Phases 4, 6a-i, 6a-ii, 6e, 6f-ii complete) | Axum server supporting REST endpoints (`/api/state`, `/api/structure`, `/api/fs/list`, `/api/fs/read`), WebSocket delta-sync (`/api/collab`) via `pack_collab_packet`/`unpack_collab_packet` (§7.3), real-time log streaming WebSocket (`/api/logs`) via `notify` crate (§13.3), and full-duplex terminal WebSocket (`/api/terminal`) with `portable-pty` process spawning (§13.2). Role enforcement with `RoleResolver` (Host/Editor/Viewer) gates endpoints (§7.1), restricting terminal access strictly to Host. LLM proxy (Ch.14) endpoints remain for Phase 6b. |
-| `frontend` | Functional (Phases 2, 4, 5a, 5b-i, 5b-ii, 5b-iii, 6a-i, 6a-ii, 6c-i, 6c-ii, 6d-i..v, 6e, 6f-i..v, 6i-ii complete) | `iced::widget::pane_grid` 4-panel layout. Ribbon/cartoon rendering pipeline (`RepresentationKind::Cartoon`) via Catmull-Rom spline with secondary-structure profiles and vertex colors (§4.3). Non-covalent interaction dashed-line rendering pipeline (`RepresentationKind::Interaction`) for hydrogen bonds, salt bridges, CH-π, and disulfide bonds (§10.2). Frustum culling via WGSL Compute Shader (`cs_cull`), compaction with atomic counters, and `draw_indexed_indirect` rendering (§4.2). Staged LOD (ball-and-stick close / billboard quad impostors medium). Bottom pane with Log Viewer and Terminal tabs; Python Console and AI Chat tabs remain "Coming soon" placeholders. WebAssembly (WASM) build pipeline via Trunk, wgpu WebGL2/WebGPU rendering, and browser WebSocket transport. Menu bar (File/View/Help), ray-cast atom picking, and context menus (§8.2–§8.4). Interactive `StructureTree`, `RepresentationInspector` (with interaction toggles), `TextEditor`, and Project Directory Tree. Real structure loading from local files and backend `/api/fs/read`. |
+| `frontend` | Functional (Phases 2, 4, 5a, 5b-i, 5b-ii, 5b-iii, 6a-i, 6a-ii, 6c-i, 6c-ii, 6d-i..v, 6e, 6f-i..v, 6i-ii complete) | `iced::widget::pane_grid` 4-panel layout. Ribbon/cartoon rendering pipeline (`RepresentationKind::Cartoon`) via Catmull-Rom spline with secondary-structure profiles and vertex colors (§4.3). Non-covalent interaction dashed-line rendering pipeline (`RepresentationKind::Interaction`) for hydrogen bonds, salt bridges, CH-π, and disulfide bonds (§10.2). Frustum culling via WGSL Compute Shader (`cs_cull`), compaction with atomic counters, and `draw_indexed_indirect` rendering (§4.2). Staged LOD (ball-and-stick close / billboard quad impostors medium). Bottom pane with Log Viewer and Terminal tabs; Python Console and AI Chat tabs remain "Coming soon" placeholders. WebAssembly (WASM) build pipeline via Trunk, wgpu WebGL2/WebGPU rendering, and browser WebSocket transport. Menu bar (File/View/Help), ray-cast atom picking, and context menus (§8.2–§8.4). Interactive `StructureTree`, `RepresentationInspector` (with interaction toggles), `TextEditor`, and Project Directory Tree. Real structure loading from local files and backend `/api/fs/read`. Python plugins (Phase 6k): each plugin runs as a separate process that YUI starts (the Python runner that YUI ships, or any program that speaks the msgpack protocol), either kept running or started anew for each command, with the plugin list in View → Plugins.... |
 | `renderer-native` | Skeleton only | ~30 lines. Only verifies loading a YAML state file. |
 | `proteindf-bridge` | Integrated into `core` (Phase 6e complete; portability complete in Phase 6g) | Real `proteindf-bridge` dependency integrated for `AtomGroup`, `Bond::setup()`, PDB/mmCIF parsers, and DSSP secondary structure estimation. Pinned to upstream release tag `2026.10.7` (including the CUBE reader, `AtomGroup::setup()` §3.14 and mmCIF export). Target-gated feature dependencies (`zstd` for native, `ruzstd` for wasm32). Remaining upstream needs: Gaussian CUBE format parser, `ProteinDF_pytools` integration (HDF5, Mulliken). |
 
@@ -37,26 +37,26 @@ This document is a handoff brief for whoever (a human contributor or an AI codin
 
 Phases are ordered by dependency, following the same build-up `architecture.md` itself uses (foundational chapters first, advanced/value-add features last). Each phase should be small enough to land as one or a few reviewable changes; don't try to do a whole phase in one giant commit.
 
-### Phase 1 — Harden `core` + local `AtomGroup`/`Selector` stand-in
+### Phase 1 — Harden `core` + local `AtomGroup`/`Selector` stand-in (Complete)
 - Bring `core`'s `AppState` in line with §2.1 (lossless Rust ⇄ MessagePack ⇄ YAML round-trip), with tests for each conversion direction.
 - Add a minimal, local `AtomGroup` (chain → residue → atom tree, §2.2) and a `Selector` with the `Select_*` predicates plus `And`/`Or`/`Not` (§6.2.1) *inside `core` for now*, clearly marked as a temporary stand-in for `proteindf-bridge`. Do not build out format parsers (PDB/mmCIF/etc.) here — that belongs to `proteindf-bridge`; a hand-built or trivially-parsed test fixture is enough to unblock rendering/UI work.
 - Add `Representation` (§6.2.2) as a structured type in `AppState`.
 
-### Phase 2 — `frontend` MVP: visible rendering
+### Phase 2 — `frontend` MVP: visible rendering (Complete)
 - `iced::widget::pane_grid` skeleton matching §8's Left/Center/Right/Bottom layout (panels can be placeholders except Center).
 - `wgpu` geometry instancing for ball-and-stick (§4.1) rendering the Phase-1 stand-in structure, natively, with no networking yet.
 - Goal: a demoable "load a small structure, see it rendered, rotate/zoom the camera" milestone.
 
-### Phase 3 — Scripting surface
+### Phase 3 — Scripting surface (Complete)
 - `PyO3` native bindings exposing `Selector`/`Representation` per §6.1 (`yui.select(...).show(...).color_by(...)`).
 - This unblocks both QCLObot integration (Ch.11) and the AI chat assistant's tool-calling (§14.3) later, since both are defined in terms of this same Python API rather than a new one.
 
-### Phase 4 — `backend` wiring: structure I/O + delta sync + roles
+### Phase 4 — `backend` wiring: structure I/O + delta sync + roles (Complete)
 - REST endpoints for structure upload/fetch; WebSocket delta-sync of `AppState` changes (§7.3) using `rmp-serde`.
 - `CollabTransport` trait (§7.2) with the `WebSocketTransport` implementation; `RoleToken` validation per the Host/Editor/Viewer model (§7.1).
 - Wire `frontend` to consume `backend` over this channel instead of (or in addition to) local file I/O.
 
-### Phase 5 — Scale-out rendering (blocked on `proteindf-bridge` for full fidelity)
+### Phase 5 — Scale-out rendering (blocked on `proteindf-bridge` for full fidelity) (5a, 5b, 5c-i, 5c-ii and 5c-iv complete; 5c-iii not started)
 
 Phase 5 covers a wide surface (§4.2–§4.5) and is split into three independently-landable sub-phases so each stays reviewable:
 
@@ -74,7 +74,7 @@ Phase 5 covers a wide surface (§4.2–§4.5) and is split into three independen
 
 All three sub-phases need robust large-structure parsing and secondary-structure labels from `proteindf-bridge` (§10, §10.1) for real protein data; against the Phase-1 stand-in, implement against synthetic/test data first and re-validate once `proteindf-bridge` lands.
 
-### Phase 6 — Terminal & Log Viewer, AI Chat Assistant
+### Phase 6 — Terminal & Log Viewer, AI Chat Assistant (6a complete; 6b not started)
 
 These are additive UI features on top of an already-working visualization + scripting core — do not start them before Phases 1–4 are functional, since they depend on the Role model (§7.1) and the Python API (§6) being in place for their access-control and tool-calling design to make sense. (This precondition is already satisfied as of Phase 4.) Chapter 13 and Chapter 14 are functionally independent of each other, so split into two sub-phases:
 
@@ -83,7 +83,7 @@ These are additive UI features on top of an already-working visualization + scri
   - **Phase 6a-ii — Terminal (Complete).** `portable-pty` PTY sessions hosted in `backend` with shell spawning and full-duplex bidirectional streaming via `/api/terminal`; ANSI/VT state machine parsed with `vt100` crate (selected over `alacritty_terminal` for zero C dependencies, pure in-memory model, and WASM compatibility); custom `iced` terminal pane widget rendering monospace cell grid with cursor tracking and quick control-key buttons. Gated strictly to Host role (role_token=1) via `RoleResolver`.
 - **Phase 6b — AI Chat Assistant (Chapter 14).** `LlmProvider` abstraction over Claude/Gemini/Ollama; chat panel; tool-calling onto the Phase-3 Python API; state-digest context grounding. Do after 6a. Note before starting: genuine end-to-end verification needs either real API credentials (Claude/Gemini) or a local Ollama install — decide up front whether to test with mocked HTTP responses only, or whether real credentials will be made available, since that materially changes what "done" looks like for this sub-phase.
 
-### Phase 6c — WASM/Web Frontend Support
+### Phase 6c — WASM/Web Frontend Support (Complete)
 
 `frontend` has been native-only through every phase so far; §1.1 states WASM compatibility as a goal, but no phase has actually attempted a browser build. Whether the existing wgpu/`iced::widget::shader`-based rendering (compute-shader culling, billboard impostors, custom ribbon/terminal pipelines) even runs in a browser at all is the biggest unknown, so prove that before adding networking:
 
@@ -92,7 +92,7 @@ These are additive UI features on top of an already-working visualization + scri
 
 Actually serving/deploying the built WASM bundle for end users stays under Phase 8 (§9); 6c only proves the capability works.
 
-### Phase 6d — Menu Bar & Context Menus (§8.2–§8.4, new)
+### Phase 6d — Menu Bar & Context Menus (§8.2–§8.4, new) (Complete)
 
 Not blocked on anything beyond the already-working visualization + scripting core; adds discoverable UI for actions that today are only reachable via the Python console or hardcoded defaults. This is a newly-designed UI area (§8 previously only had three sparse bullets) rather than an implementation of a pre-existing spec, so it's split by what's buildable today vs. what needs a prerequisite widget built first — Left and Right panes are currently placeholder text, not interactive widgets:
 
@@ -104,7 +104,7 @@ Not blocked on anything beyond the already-working visualization + scripting cor
 
 All five sub-phases must route their actions through the same `Selector`/`Representation` Python-API-equivalent calls as the scripting layer (§8.4) — no menu- or context-menu-specific command path, consistent with the no-new-DSL rule (§6.2).
 
-### Phase 6e — Replace the local `AtomGroup`/`Selector` stand-in with real `proteindf-bridge` (unblocks Phase 5c and Phase 7)
+### Phase 6e — Replace the local `AtomGroup`/`Selector` stand-in with real `proteindf-bridge` (unblocks Phase 5c and Phase 7) (Complete)
 Investigated 2026-09-19: this was always the plan (`core/src/atom_group.rs` and `selector.rs` are explicitly documented as "temporary local stand-ins... until proteindf-bridge is implemented"), and real `proteindf-bridge` already has a working, documented "protein schema" convention (`/model_N/chain_id/res_key/atom_key` path depth, exactly mirroring this repo's typed `Model → Chain → Residue → AtomRecord`) plus a `Bond::setup()` VDW-radius detector — so bond generation belongs entirely on the `proteindf-bridge` side; this repo should only consume it, never reimplement detection logic locally (§10). A direct type swap (not a converting adapter layer) is the right shape, but the blast radius is real: 14 files read the typed `.models`/`.chains`/`.residues`/`.atoms` fields directly (`core/src/{selector,atom_group,packing,spatial,export}.rs`, `core-py/src/{state,atom_group}.rs`, `frontend/src/{ribbon,structure_tree,menu_bar,state_sync,viewport}.rs`, `backend/src/main.rs`, `renderer-native/src/main.rs`), so this is split into dependency-ordered sub-phases rather than one PR. Breaks `state.yaml`/MessagePack backward compatibility for any file carrying real `atom_group` data — no `#[serde(default)]` can bridge a full type swap, so 6e-vii must give `AppState.version` real meaning (a clear "unsupported/legacy format" error) instead of leaving it a decorative counter.
 
 **Branching exception (decided 2026-09-19, while reviewing 6e-ii):** Ground Rule §1 requires
@@ -129,7 +129,7 @@ sub-phase in order (oldest first), each merge now a fast-forward with no new bre
 - **Phase 6e-vi (Complete) — Wire real bond generation**: call `proteindf_bridge::Bond::setup()` in `to_flat_molecule()` (or its spatially-accelerated successor, if the bridge-side scalability request below is addressed first) to populate `Molecule.bonds`; switch `frontend/src/viewport.rs` to prefer non-empty `Molecule.bonds` over its `AtomBvh::query_pairs_within_range` geometric fallback.
 - **Phase 6e-vii (Complete) — Format-break handling and real-data validation.** Give `AppState.version` a real "unsupported/legacy `atom_group` format" error path instead of a cryptic serde failure. Validate the 6e-ii depth-convention assumption against at least one real PDB/mmCIF file parsed through `proteindf-bridge`'s actual parser (not just this repo's synthetic fixtures), since nothing in `proteindf-bridge` enforces the schema (see bridge-side request). Update `architecture.md`/`architecture.ja.md` §2 to describe the real `AtomGroup` type in place of the stand-in.
 
-### Phase 6f — VSCode-style project explorer with a generic text editor
+### Phase 6f — VSCode-style project explorer with a generic text editor (Complete)
 `architecture.md` §1.1 already anticipated "future views such as a script editor" when Phase 6d-iii generalized pane content into runtime `ViewId`s. This phase implements that: browsing a chosen project directory as a tree (reusing the Left pane's existing "Explorer / Playbook" tab strip, alongside `StructureTree`), and opening a selected file in whichever viewer fits it — a new generic text editor by default, or an existing structure/state viewer when the extension matches one, with the user able to override the choice when more than one applies. Split into dependency-ordered sub-phases so each PR stays reviewable.
 
 **Design corrections found before kickoff (2026-09-23):** the original split assumed `rfd::AsyncFileDialog` alone would cover directory *browsing* the same way it covers single-file open/save — it doesn't. On wasm32, `FileHandle` from `pick_folder()` is an opaque reference with no `path()` and no listing capability (`path()` "does not exist in WASM32" per rfd's own docs); enumerating a folder's contents client-side would need the browser's separate File System Access API, which Firefox and Safari don't implement at all (Chromium-only, confirmed as of Sept 2026) — a real dead end for a cross-browser tree. The fix: browse via the existing `backend` server instead of the browser's local filesystem. `backend` already runs with full native `std::fs` access and already has an analogous env-var-scoped filesystem convention (`YUI_LOG_ROOT` for the log-streaming feature) to model a new `YUI_WORKSPACE_ROOT` on — a REST endpoint under that root works identically for native and wasm32 clients (both just issue HTTP requests, same as the rest of this app's collab/REST layer), sidestepping the browser API gap entirely rather than accepting it as permanent. Native builds keep a `rfd::pick_folder()`-plus-local-`std::fs` fallback for standalone use with no backend connected. Separately, "route structure files into the existing 3D-viewport/`AtomGroup` pipeline" turned out not to describe anything that exists yet — the only code that loads a real PDB/mmCIF file into an `AtomGroup` lives in `core/tests/real_pdb_validation.rs` (test-only), never reachable from the running app. That's carved out into its own small sub-phase rather than left as an assumed dependency of the dispatch phase.
@@ -140,18 +140,18 @@ sub-phase in order (oldest first), each merge now a fast-forward with no new bre
 - **Phase 6f-iv (Complete) — Load a real structure file into `AppState`.** Wires `proteindf_bridge`'s PDB/mmCIF loaders (`Pdb::from_file()` → `get_atomgroup()` → `AtomGroup::setup()`, the same pipeline `core/tests/real_pdb_validation.rs` already exercises in tests) into an app-reachable function that populates `AppState.atom_group`/`secondary_structure_map` from file bytes (sourced either from a local path or from a 6f-ii `/api/fs/read` response) and calls `sync_molecule_from_atom_group()` — today this path has never been reachable from the running UI, only synthetic fixtures ever get loaded. No UI entry point of its own yet; 6f-v calls it.
 - **Phase 6f-v (Complete) — "Open with" dispatch.** Routes a file selected in 6f-iii to a handler by extension: a sensible default (structure files such as `.pdb`/`.cif`/`.mol2` go through 6f-iv's loader; anything else opens in the 6f-i text editor), with a picker the user can use to override the default when more than one handler applies to a given extension (e.g. `.yaml` could be a workspace `state.yaml` import or plain text).
 
-### Phase 6g — Portable Build Environment and Initial Release
+### Phase 6g — Portable Build Environment and Initial Release (Complete)
 - **Phase 6g-i (Complete) — Portable `proteindf-bridge` dependency.** Replace relative path dependency `../../ProteinDF_bridge/rust/crates/proteindf-bridge` with HTTPS Git dependency pinned to rev `997ad2478e8681ce2d55ff381feaa759b3395490` with target-gated features (`zstd` native / `ruzstd` wasm32). Copy test structures (`1hls.pdb`, `1HLS.cif`) to `core/tests/data/` with attribution README. Support local overrides via external `~/.cargo/config.toml` `[patch]`.
 - **Phase 6g-ii (Complete) — Documentation and Roadmap synchronization.** Bring `ROADMAP.md`/`ROADMAP.ja.md` §2 current state table and §3 phased plan up to date with completed phases and future priorities.
 - **Phase 6g-iii (Complete) — Initial release `release/2026.10.0`.** Create `release/2026.10.0` branch, bump package versions, verify clean check gates, and execute release merge to `main` with CalVer git tag per git-flow.
 
-### Phase 6h — Python Console
+### Phase 6h — Python Console (Not started; the design is decided again, because the embedded interpreter was removed in Phase 6k)
 (*Note: Deferred by user decision on 2026-10-03 to prioritize Phase 6i Non-covalent Interaction Visualization*)
 Bottom pane's "Python Console" tab currently displays a "Coming soon" placeholder. This phase implements interactive Python evaluation, laying the foundation for AI Chat tool-calling (Phase 6b) and interactive QCLObot analysis (Phase 7):
 - **Phase 6h-i — Native embedded Python console (PyO3).** Embedded interactive Python REPL in the Bottom pane running within the native process, with direct access to `yui` module and active `AppState`.
 - **Phase 6h-ii — WASM Python console (Pyodide).** In-browser WebAssembly Python REPL via Pyodide, matching the native scripting capability in web deployments.
 
-### Phase 6i — Non-covalent Interaction Visualization
+### Phase 6i — Non-covalent Interaction Visualization (Complete)
 Render `proteindf-bridge`'s `InteractionSet` (hydrogen bonds, CH-π, ion pairs, disulfide bonds) directly in the 3D viewport as dashed geometric connectors and selectable representations.
 - **Phase 6i-i (Complete) — Load-time detection, storage, and endpoint resolution (core).** Detect interactions per model via `detect_all` on structure load and store in `AppState.interactions`. Implement 3D endpoint resolution (`resolve_interaction_endpoints`) and atom ID resolution (`resolve_interaction_atom_ids`). Provide integration tests with real 1HLS data (PDB/mmCIF) and round-trip serialization tests.
 - **Phase 6i-ii (Complete) — Frontend dashed-connector rendering & Representation integration.** Implement dashed connector GPU rendering pipeline in the 3D viewport and support toggling/filtering from `Representation` with `kind: Interaction`.
@@ -162,7 +162,7 @@ Designed in `architecture.md` §7.4. **Urgent finding:** even bound to `127.0.0.
 - **Phase 6j-ii (Complete; checked in Chrome) — Random secrets, delivery and binding.** Random Host secret at start (`YUI_TOKEN` overrides), `RoleResolver` on strings (`TokenStore`), role bound to the connection, every `/api/` route authenticated, the secret in `Authorization: Bearer` / the WebSocket subprotocol (no ticket API: headers already keep it out of URLs), `backend.json` / `--token` / `#token=` delivery, `YUI_BIND` with the TLS-proxy declaration and the terminal / file gates.
 - **Phase 6j-iii (Complete) — Invitations and abuse limits.** `POST/GET /api/invites`, `DELETE /api/invites/{id}` for expiring, revocable Editor / Viewer secrets (their open connections close at once when revoked, and at the expiry time), `scripts/yui-invite.py`, and a per-peer lock-out (10 failures in 60 s → 60 s of 429). The app has **File → Share Session...** for creating, listing and revoking them.
 
-### Phase 6k — Python Plugins
+### Phase 6k — Python Plugins (Complete)
 Designed in `architecture.md` §6.4: developers outside the project add features in Python, run as separate processes that YUI starts (messages in msgpack over standard input and output; no plugins in the browser build for now). Complete in the native app (6k-i to 6k-vi). Not yet: `pip` / entry points, third-party packages such as `numpy`, and the Log Viewer opening `plugin.log` automatically.
 - **Phase 6k-i — Embedded Python runtime (Complete; replaced by 6k-v).** The first version ran CPython inside the app (the `python` feature of `frontend`, a Python thread connected to the UI thread by channels). It has been removed; the Python console (Phase 6h-i) will need its own decision (§6.4).
 - **Phase 6k-ii — Loading plugins (Complete; failures go to the status bar and `plugin.log`, not yet to the Log Viewer).** `<config>/yui/plugins/<name>/` with `plugin.yaml` and `register(app)`, the `api_version` check, `plugins.enabled` in `settings.yaml` (disabled until enabled), and failures shown in the status bar and the Log Viewer. Before this step, decide whether `pip` / entry points are supported as well.
@@ -171,19 +171,25 @@ Designed in `architecture.md` §6.4: developers outside the project add features
 - **Phase 6k-v — Plugins as separate processes (Complete for `resident` plugins).** The message protocol (msgpack with a length prefix), child processes that YUI starts and stops, a Python runner that needs nothing installed (it uses the `msgpack` package when present), `plugins.python` in `settings.yaml`, and `mode` / `command` in `plugin.yaml`. Builds no longer need `--features python`.
 - **Phase 6k-vi — The `oneshot` mode (Complete).** A new process for each command call; the menu items and commands in `plugin.yaml` (`menu_items`, `commands`); `{input}` / `{output}` files in msgpack; a Python package keeps `register(app)` through the runner; one failed call does not disable the plugin. A guide to the protocol for other languages (`docs/plugins/plugin-protocol.md`) and an example (`examples/protocol/raw-python`).
 
-### Phase 7 — QCLObot integration & canonical-MO research features
+### Phase 6l — Plots linked with the 3D view (Planned)
+Graphs of calculation results whose points can be selected in the plot and in the 3D view, and the other way round.
+- **Phase 6l-i — A generic scatter plot with point selection.** A plot tab in the bottom pane, a plot data type in `core`, and clicking points selects atoms (the same selection as in the 3D view).
+- **Phase 6l-ii — Graphs from `ProteinDF_pytools`.** Read the plot JSON that `ProteinDF_pytools` writes, link each point to an atom (checked by the number of atoms and their coordinates), and select in both directions. Graphs whose points are not atoms (orbitals, energy levels) come later.
+- **Phase 6l-iii — Ramachandran plot.** Select residues from the φ/ψ plot.
+
+### Phase 7 — QCLObot integration & canonical-MO research features (Not started)
 - Chapter 11 (`.QCLO.yaml` playbook, step playback, bidirectional tree/YAML/3D linking, `modeler.yml` DAG view).
 - Chapter 12 (MO browser, orbital contribution mapping, QCLO convergence view, multi-calculation diff view).
 - Depends on `proteindf-bridge`'s `ProteinDF_pytools` integration (HDF5 reading, Mulliken contributions, matrix operations — §10) being available; this is the deepest dependency on the sister project.
 
-### Phase 8 — Publication-quality output & distribution
+### Phase 8 — Publication-quality output & distribution (In progress)
 - SSAO/path-tracing offline rendering (§4.7), SVG vector export (§4.6). Done so far: SSAO as an option (`render.ssao_strength`, off by default; §4.7 Phase A), File → Export Image (SVG) for atoms, bonds, interaction lines, ribbons and surfaces, and File → Export Image (PNG) of the whole view with a width / smoothing / transparent-background dialog (§4.6). File → Export Animation (numbered PNGs and an MP4 through ffmpeg; spin / rock / model or trajectory frames; desktop only). Web build deployment is done for local use (`scripts/build-web.sh`, the backend serves it with `YUI_WEB_ROOT`; not for network exposure until backend authentication exists). Native installers are done unsigned (`scripts/build-installers.sh`, the manual workflow `release-installers.yml`: Linux deb + AppImage, macOS dmg, Windows NSIS exe; only the Linux ones were built and started here). Animation export in the browser is done as a zip of PNG frames (the memory path and the zip were run on the desktop renderer; the real browser path was not). Not done: signing / notarization, a Windows msi (CalVer does not fit the MSI version rules), an rpm.
 - Native installers, plus serving/deploying the WASM `frontend` build produced in Phase 6c (Chapter 9).
 
 ---
 
 ### Recommended Execution Order
-`6g → 6i → 6b → 5c → 7 → 8`
+Done: `6g → 6i → 5c (except 5c-iii) → 6j → 6k`. Next: `6l` (plots linked with the 3D view), then the Python console (`6h`, after its design is decided again), the AI chat (`6b`), `7` and `8`. `7` waits for `proteindf-bridge`; `5c-iii` (the GPU port of the surface extraction) and the third LOD tier (surface only at long range) can be done at any time.
 
 ### Requests to `proteindf-bridge` Upstream
 - **Gaussian CUBE parser (available):** `proteindf-bridge` 2026.10.5 has it and Phase 5c-iv uses it; real ProteinDF CUBE files are still to be tried.
