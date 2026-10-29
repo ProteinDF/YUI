@@ -31,6 +31,17 @@ pub fn command_for(python: &str, folder: &Path, name: &str, version: &str) -> Ve
     ]
 }
 
+/// `oneshot` のプラグインを動かすコマンド。`{input}` と `{output}` は、呼ぶたびに置き換える。
+pub fn oneshot_command_for(python: &str, folder: &Path, name: &str, version: &str) -> Vec<String> {
+    let mut argv = command_for(python, folder, name, version);
+    argv.extend([
+        "--oneshot".to_string(),
+        super::oneshot::INPUT_PLACEHOLDER.to_string(),
+        super::oneshot::OUTPUT_PLACEHOLDER.to_string(),
+    ]);
+    argv
+}
+
 #[cfg(test)]
 /// 動く Python。見つからない環境（Python が入っていない）では `None`で、テストは読み飛ばす。
 pub(crate) fn find_python() -> Option<String> {
@@ -378,6 +389,112 @@ def register(app):
         let value = Value::Map(vec![(Value::from("n"), Value::from(-70_000))]);
         let rx = plugin.invoke("plugin.sample.echo", Value::Nil, value.clone());
         assert_eq!(rx.recv_timeout(WAIT).expect("an answer"), Ok(Some(value)));
+    }
+
+    /// ランナーを `--oneshot` で動かす呼び出し方（`builtin` なら自前の msgpack を使わせる）
+    fn oneshot_plugin(
+        python: &str,
+        scratch: &Scratch,
+        source: &str,
+        builtin: bool,
+    ) -> crate::plugin_process::oneshot::OneshotPlugin {
+        let folder = scratch.plugin(source);
+        let mut argv = oneshot_command_for(python, &folder, "sample", "0.1.0");
+        if builtin {
+            argv.push("--builtin-msgpack".into());
+        }
+        crate::plugin_process::oneshot::OneshotPlugin::new("sample", &folder, argv, &scratch.log())
+    }
+
+    #[test]
+    fn the_oneshot_command_has_the_input_and_output_marks_at_the_end() {
+        let argv = oneshot_command_for("python3", Path::new("/p/sample"), "sample", "0.1.0");
+        assert_eq!(
+            &argv[argv.len() - 3..],
+            ["--oneshot", "{input}", "{output}"]
+        );
+        assert!(crate::plugin_process::oneshot::has_placeholders(&argv));
+    }
+
+    #[test]
+    fn a_oneshot_call_runs_one_command_and_returns_its_value() {
+        for_each_msgpack(|python, builtin| {
+            let scratch = Scratch::new("once");
+            let plugin = oneshot_plugin(python, &scratch, PLUGIN, builtin);
+            let value = Value::Map(vec![
+                (Value::from("n"), Value::from(-70_000)),
+                (Value::from("text"), Value::from("日本語")),
+                (
+                    Value::from("list"),
+                    Value::Array(vec![Value::Nil, Value::F64(2.5)]),
+                ),
+            ]);
+            let rx = plugin.call("plugin.sample.echo", Value::Nil, value.clone());
+            assert_eq!(
+                rx.recv_timeout(WAIT).expect("an answer"),
+                Ok(Some(value)),
+                "builtin={builtin}"
+            );
+        });
+    }
+
+    #[test]
+    fn a_oneshot_call_gets_the_target_and_print_goes_to_the_log() {
+        for_each_msgpack(|python, builtin| {
+            let scratch = Scratch::new("once-target");
+            let plugin = oneshot_plugin(python, &scratch, PLUGIN, builtin);
+            let target = Value::Map(vec![
+                (Value::from("kind"), Value::from("atom")),
+                (Value::from("atom_id"), Value::from(12)),
+            ]);
+            let rx = plugin.call("plugin.sample.target", target, Value::Nil);
+            assert_eq!(rx.recv_timeout(WAIT).expect("an answer"), Ok(None));
+            let log = scratch.log_text();
+            assert!(
+                log.contains("sample: target={'kind': 'atom', 'atom_id': 12}"),
+                "{log}"
+            );
+            assert!(log.contains("sample: printed to stdout"), "{log}");
+        });
+    }
+
+    #[test]
+    fn a_oneshot_failure_has_its_reason() {
+        for_each_msgpack(|python, builtin| {
+            let scratch = Scratch::new("once-fail");
+            let plugin = oneshot_plugin(python, &scratch, PLUGIN, builtin);
+            let rx = plugin.call("plugin.sample.boom", Value::Nil, Value::Nil);
+            assert_eq!(
+                rx.recv_timeout(WAIT).unwrap(),
+                Err("ValueError: boom".to_string())
+            );
+            let rx = plugin.call("plugin.sample.nope", Value::Nil, Value::Nil);
+            let reason = rx.recv_timeout(WAIT).unwrap().unwrap_err();
+            assert!(reason.contains("unknown command"), "{reason}");
+            // 送れない値を返したときも、失敗の結果になる
+            let rx = plugin.call("plugin.sample.unsendable", Value::Nil, Value::Nil);
+            let reason = rx.recv_timeout(WAIT).unwrap().unwrap_err();
+            assert!(reason.contains("cannot be sent"), "{reason}");
+        });
+    }
+
+    #[test]
+    fn a_oneshot_plugin_that_fails_to_register_reports_the_last_stderr_line() {
+        for_each_msgpack(|python, builtin| {
+            let scratch = Scratch::new("once-register");
+            let plugin = oneshot_plugin(
+                python,
+                &scratch,
+                "def register(app):\n    raise RuntimeError('cannot register')\n",
+                builtin,
+            );
+            let rx = plugin.call("plugin.sample.echo", Value::Nil, Value::Nil);
+            let reason = rx.recv_timeout(WAIT).unwrap().unwrap_err();
+            assert!(
+                reason.contains("register failed: RuntimeError: cannot register"),
+                "{reason}"
+            );
+        });
     }
 
     #[test]

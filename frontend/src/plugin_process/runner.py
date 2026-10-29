@@ -3,6 +3,7 @@
 YUI starts this file as a child process, with the Python chosen for plugins:
 
     python -X utf8 -c <this file> <plugin folder> <plugin name> <plugin version> [--builtin-msgpack]
+    python -X utf8 -c <this file> <plugin folder> <plugin name> <plugin version> --oneshot <input> <output>
 
 It imports the plugin package (`<folder>/__init__.py`), calls `register(app)`, and then talks to YUI over its
 standard input and output: every message is msgpack, preceded by its length in 4 bytes (big-endian), and carries
@@ -15,7 +16,12 @@ The plugin author's API is the same as before: `register(app)`, `app.log(message
 The `msgpack` package is used when it is installed. Otherwise a small built-in implementation is used, so a plugin
 needs nothing to be installed. `--builtin-msgpack` always uses the built-in one (for tests).
 
-The real standard output is kept for the protocol only. `print()` and anything else the plugin writes to the
+With `--oneshot` (a plugin whose `mode` is `oneshot`) it handles one command and ends: it reads the input file
+(one msgpack map: `v`, `command`, `target`, `args`), imports the package, calls `register(app)` to find the command,
+runs it, and writes the output file (`v`, `ok`, `error`, `result`). `app.add_menu_item` is ignored then, because the
+menu items of such a plugin are written in `plugin.yaml`, and `app.log` writes to the standard error.
+
+In the default mode the real standard output is kept for the protocol only. `print()` and anything else the plugin writes to the
 standard output goes to the standard error, which YUI writes to `plugin.log`.
 """
 
@@ -343,12 +349,69 @@ def _invoke(app, message):
                 "error": "%s: %s" % (type(e).__name__, e), "result": None}
 
 
+class _OneshotApp:
+    """`app` for one command: the menu items come from plugin.yaml, and there is no channel for the log."""
+
+    def __init__(self):
+        self.commands = {}
+
+    def log(self, message):
+        sys.stderr.write(str(message) + "\n")
+        sys.stderr.flush()
+
+    def add_command(self, command_id, func):
+        if not callable(func):
+            raise TypeError("add_command needs a function")
+        self.commands[str(command_id)] = func
+
+    def add_menu_item(self, location, order, label, command, args=None):
+        pass
+
+
+def main_oneshot(folder, name, in_path, out_path, packb, unpackb):
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError):
+        pass
+    with open(in_path, "rb") as f:
+        message = unpackb(f.read())
+    if not isinstance(message, dict) or message.get("v") != PROTOCOL_VERSION:
+        sys.stderr.write("the input file is not a version %d message\n" % PROTOCOL_VERSION)
+        return 2
+    app = _OneshotApp()
+    try:
+        module = _load(folder, name)
+        module.register(app)
+    except Exception as e:
+        traceback.print_exc()
+        sys.stderr.write("register failed: %s: %s\n" % (type(e).__name__, e))
+        return 2
+
+    reply = _invoke(app, message)
+    del reply["type"], reply["id"]
+    reply["v"] = PROTOCOL_VERSION
+    try:
+        body = packb(reply)
+    except (TypeError, OverflowError, ValueError) as e:
+        body = packb({"v": PROTOCOL_VERSION, "ok": False, "result": None,
+                      "error": "the result cannot be sent (%s: %s)" % (type(e).__name__, e)})
+    with open(out_path, "wb") as f:
+        f.write(body)
+    return 0
+
+
 def main(argv):
     if len(argv) < 4:
         sys.stderr.write("usage: runner <plugin folder> <plugin name> <plugin version> [--builtin-msgpack]\n")
         return 2
     folder, name, version = argv[1], argv[2], argv[3]
     packb, unpackb = _choose_msgpack("--builtin-msgpack" in argv[4:])
+    if "--oneshot" in argv[4:]:
+        at = argv.index("--oneshot")
+        if len(argv) < at + 3:
+            sys.stderr.write("--oneshot needs an input file and an output file\n")
+            return 2
+        return main_oneshot(folder, name, argv[at + 1], argv[at + 2], packb, unpackb)
 
     # Ctrl+C in the terminal that runs YUI must not end the plugin; YUI ends it by closing the standard input.
     try:

@@ -114,12 +114,23 @@ impl Yui {
             }
             Message::PluginCommandDone { plugin, result } => {
                 if let Err(reason) = result {
-                    // 失敗したプラグインは外す（項目が消え、押せなくなる）。アプリは続ける。
+                    // 常駐のプラグインは、失敗したら外す（項目が消え、押せなくなる）。アプリは続ける。
+                    // 都度呼び出しのプラグインは、その呼び出しが失敗しただけなので、外さない。
                     #[cfg(not(target_arch = "wasm32"))]
-                    crate::plugin_menu::mark_failed(&plugin, &reason);
-                    self.status_message = Some(StatusMessage::warning(format!(
-                        "Plugin {plugin} failed and was disabled: {reason}"
-                    )));
+                    let oneshot = crate::plugins::is_oneshot(&plugin);
+                    #[cfg(target_arch = "wasm32")]
+                    let oneshot = false;
+                    if oneshot {
+                        self.status_message = Some(StatusMessage::warning(format!(
+                            "Plugin {plugin}: the command failed: {reason}"
+                        )));
+                    } else {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        crate::plugin_menu::mark_failed(&plugin, &reason);
+                        self.status_message = Some(StatusMessage::warning(format!(
+                            "Plugin {plugin} failed and was disabled: {reason}"
+                        )));
+                    }
                 }
             }
             Message::PluginsDialogOpen => {

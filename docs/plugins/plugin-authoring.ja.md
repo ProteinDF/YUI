@@ -46,7 +46,9 @@ plugins:
 | `description` | いいえ | 一覧に出す 1 行の説明。 |
 | `author` | いいえ | 一覧に出す作者。 |
 | `command` | いいえ | 起動するプログラムと引数のリスト（シェルは通さない）。Python のパッケージでは省く。 |
-| `mode` | いいえ | `resident`（既定）: YUI が動いている間、動き続ける 1 つのプロセス。`oneshot`（コマンドごとに新しいプロセス）は、まだ使えない。 |
+| `mode` | いいえ | `resident`（既定）: YUI が動いている間、動き続ける 1 つのプロセス。`oneshot`: コマンドを呼ぶたびに新しいプロセス（「oneshot の方式」を参照）。 |
+| `menu_items` | oneshot のみ | メニュー項目の `{location, order, label, command, args}` のリスト（`args` は省ける）。 |
+| `commands` | いいえ | oneshot のみ: メニュー項目のないコマンドの識別子。 |
 
 `plugin.yaml` が合わないプラグインは読み込まれません。理由は、一覧と `plugin.log` に出ます。
 
@@ -103,6 +105,21 @@ plugins:
 
 将来の版で、`ctx` に鍵が増えることがあります。ここに挙げた鍵だけがあると、決めつけないでください。
 
+## oneshot の方式
+
+`mode: oneshot` では、YUI はコマンドを呼ぶたびに新しいプロセスを起動し、動かし続けません。めったに実行しないコマンドや、メモリを持ち続けたくないコマンドに向きます。`register` がないので、メニュー項目は `plugin.yaml` に書きます。
+
+```yaml
+name: say-once
+version: 0.1.0
+api_version: 1
+mode: oneshot
+menu_items:
+  - {location: menu/view, order: 500, label: "Say once", command: plugin.say-once.say, args: {greeting: hi}}
+```
+
+Python のパッケージは、これまでどおり `register(app)` と `func(ctx, args)` を書きます。`register` は新しいプロセスの中で、コマンドを探すためにだけ呼ばれ、`app.add_menu_item` は無視され、`app.log` は標準エラーに書かれます。Python 以外のプログラムは、`{input}` と `{output}` を含む `command` を書きます（例: `command: [./run, "{input}", "{output}"]`）。YUI は入力ファイル（msgpack の連想配列 1 つ: `v`、`command`、`target`、`args`）を書き、2 つのパスを渡してコマンドを実行し、出力ファイル（msgpack の連想配列 1 つ: `v`、`ok`、`error`、`result`）を読みます。`ok` が偽のとき、またはプログラムが 0 以外で終わったときは、その呼び出しが失敗です。1 回の失敗でプラグインは外されず、理由はステータスバーに出ます。プログラムが標準出力や標準エラーに書いたものは、`plugin.log` に書かれます。呼び出しに時間制限はなく、動いているプロセスは YUI を終えるときに止めます。
+
 ## 失敗と plugin.log
 
 読み込みと失敗は、すべてプラグインのフォルダーの `plugin.log` に書かれます。理由は、ステータスバーと一覧にも出ます。失敗で YUI が止まることはありません。
@@ -143,7 +160,6 @@ def register(app):
 ## まだ使えないもの
 
 - `pip` やエントリポイントによるプラグインの導入。今はフォルダーだけです。
-- `oneshot` の方式（コマンドごとに新しいプロセス）。
 - Python 以外の言語でプラグインを書くための手引き。
 - メニューの項目の、Python で計算する有効・チェックの状態。
 - プラグインからの、アプリのデータ（構造、選択）の参照。読み取り専用の窓口は計画していますが、まだ定義していません。

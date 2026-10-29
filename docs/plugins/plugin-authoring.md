@@ -46,7 +46,9 @@ Each plugin is one folder under the plugins folder of your configuration folder:
 | `description` | no | One line shown in the plugin list. |
 | `author` | no | Shown in the plugin list. |
 | `command` | no | The program and its arguments, as a list (no shell). Leave it out for a Python package. |
-| `mode` | no | `resident` (the default): one process that runs while YUI runs. `oneshot` (a new process for each command) is not supported yet. |
+| `mode` | no | `resident` (the default): one process that runs while YUI runs. `oneshot`: a new process for each command call (see "The oneshot mode"). |
+| `menu_items` | oneshot only | The menu items, as a list of `{location, order, label, command, args}` (`args` is optional). |
+| `commands` | no | oneshot only: ids of commands that have no menu item. |
 
 A plugin whose `plugin.yaml` does not fit is not loaded; the reason is shown in the plugin list and in `plugin.log`.
 
@@ -103,6 +105,21 @@ Plugin items are always enabled and never checked.
 
 Later versions may add more keys to `ctx`. Do not rely on `ctx` having only these keys.
 
+## The oneshot mode
+
+With `mode: oneshot`, YUI starts a new process for each command call and does not keep one running. Use it for a command that is run rarely, or that should not keep memory. There is no `register`, so the menu items are written in `plugin.yaml`:
+
+```yaml
+name: say-once
+version: 0.1.0
+api_version: 1
+mode: oneshot
+menu_items:
+  - {location: menu/view, order: 500, label: "Say once", command: plugin.say-once.say, args: {greeting: hi}}
+```
+
+For a Python package, write `register(app)` and `func(ctx, args)` as usual: `register` is called in the new process only to find the command, `app.add_menu_item` is ignored and `app.log` writes to the standard error. For any other program, give a `command` that contains `{input}` and `{output}`, for example `command: [./run, "{input}", "{output}"]`. YUI writes the input file (one msgpack map: `v`, `command`, `target`, `args`), runs the command with the two paths, and reads the output file (one msgpack map: `v`, `ok`, `error`, `result`). A call fails when `ok` is false or the program exits with a non-zero status; one failed call does not disable the plugin, and the reason is shown in the status bar. Whatever the program writes to the standard output or the standard error goes to `plugin.log`. A call has no time limit; the processes still running are stopped when YUI quits.
+
 ## Failures and plugin.log
 
 Every load and every failure is written to `plugin.log` in the plugins folder. The reasons are also shown in the status bar and in the plugin list. A failure never stops YUI:
@@ -143,7 +160,6 @@ Copy the folder to `<config>/yui/plugins/hello-yui/`, enable it, restart YUI, an
 ## Not yet available
 
 - Installing plugins with `pip` or entry points. Plugins are folders for now.
-- The `oneshot` mode (a new process for each command).
 - A guide to writing a plugin in a language other than Python.
 - Enabled or checked state computed by Python for a menu item.
 - Calling the app's data (the structure, the selection) from a plugin: a read-only view is planned but not yet defined.
