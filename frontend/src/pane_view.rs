@@ -16,6 +16,35 @@ use crate::app::GroupId;
 use crate::text_editor_pane::DocumentId;
 use iced::widget::pane_grid::Axis;
 
+/// 散布図の種類（`ViewId::Plot`）。プロットごとに、データを作るアダプタが決まる（`plot/`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlotKind {
+    /// 開発用のサンプル: 原子の座標（x と y）
+    AtomPositions,
+}
+
+impl PlotKind {
+    pub const ALL: [PlotKind; 1] = [PlotKind::AtomPositions];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlotKind::AtomPositions => "Plot: Atom Positions",
+        }
+    }
+
+    /// コマンドの引数に書く名前
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PlotKind::AtomPositions => "atom_positions",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == name)
+    }
+}
+
 /// 登録されたビュー種別の識別子 (Phase 6d-iii)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +76,8 @@ pub enum ViewId {
     LegacyTextEditor,
     /// プロジェクトディレクトリツリー（Leftペイン・Phase 6f-iii）
     ProjectTree,
+    /// 散布図（Phase 6l-i）。View メニューから開く。下のパネルに並ぶ。
+    Plot(PlotKind),
 }
 
 impl ViewId {
@@ -65,6 +96,7 @@ impl ViewId {
             ViewId::Document(_) => "Document",
             ViewId::LegacyTextEditor => "Text Editor",
             ViewId::ProjectTree => "Project",
+            ViewId::Plot(kind) => kind.label(),
         }
     }
 }
@@ -665,6 +697,19 @@ pub fn active_document(pane_views: &PaneLayout) -> Option<DocumentId> {
             ViewId::Document(id) => Some(id),
             _ => None,
         })
+}
+
+/// 散布図のタブを開いて選ぶ。すでに開いていれば、選ぶだけ（種類ごとに 1 つ）。
+/// 新しく開くときは、下のパネルの最後に足す。
+pub fn open_plot_tab(pane_views: &mut PaneLayout, kind: PlotKind) {
+    let view = ViewId::Plot(kind);
+    if pane_views.values_mut().any(|s| s.select_view(view)) {
+        return;
+    }
+    if let Some(bottom) = pane_views.get_mut(&PaneKind::Bottom) {
+        bottom.views.push(view);
+        bottom.active_index = bottom.views.len() - 1;
+    }
 }
 
 /// ドキュメントのタブを追加する。分割なしなら中央のペイン、分割ありなら右側に並べる（`home_group`）。
@@ -2000,5 +2045,51 @@ mod tests {
                 .views
                 .contains(&ViewId::Document(D1))
         );
+    }
+
+    #[test]
+    fn opening_a_plot_adds_one_tab_to_the_bottom_panel_and_selects_it() {
+        let mut views = default_pane_views();
+        open_plot_tab(&mut views, PlotKind::AtomPositions);
+        let plot = ViewId::Plot(PlotKind::AtomPositions);
+        let bottom = &views[&PaneKind::Bottom];
+        assert_eq!(bottom.views.iter().filter(|v| **v == plot).count(), 1);
+        assert_eq!(bottom.active_view(), Some(plot));
+        // 別のタブを選んでから開き直すと、タブを増やさず、選び直す
+        views
+            .get_mut(&PaneKind::Bottom)
+            .expect("bottom")
+            .select_view(ViewId::LogViewer);
+        open_plot_tab(&mut views, PlotKind::AtomPositions);
+        let bottom = &views[&PaneKind::Bottom];
+        assert_eq!(bottom.views.iter().filter(|v| **v == plot).count(), 1);
+        assert_eq!(bottom.active_view(), Some(plot));
+    }
+
+    #[test]
+    fn a_plot_tab_survives_saving_and_an_old_workspace_without_it_still_loads() {
+        let mut views = default_pane_views();
+        open_plot_tab(&mut views, PlotKind::AtomPositions);
+        let yaml = serde_yaml::to_string(&views).expect("serialize");
+        assert!(yaml.contains("atom_positions"), "{yaml}");
+        let back: PaneLayout = serde_yaml::from_str(&yaml).expect("parse");
+        assert!(
+            back[&PaneKind::Bottom]
+                .views
+                .contains(&ViewId::Plot(PlotKind::AtomPositions))
+        );
+        // プロットのタブがない、これまでの形のワークスペースも読める
+        let old = serde_yaml::to_string(&default_pane_views()).expect("serialize");
+        assert!(!old.contains("atom_positions"));
+        let loaded: PaneLayout = serde_yaml::from_str(&old).expect("parse");
+        assert_eq!(loaded, default_pane_views());
+    }
+
+    #[test]
+    fn plot_kind_names_round_trip() {
+        for kind in PlotKind::ALL {
+            assert_eq!(PlotKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(PlotKind::parse("nope"), None);
     }
 }

@@ -70,6 +70,7 @@ impl Mapping {
         )
     }
 
+    #[cfg(test)]
     pub fn to_data(self, p: Point) -> (f64, f64) {
         let tx = f64::from((p.x - self.rect.x) / self.rect.width);
         let ty = 1.0 - f64::from((p.y - self.rect.y) / self.rect.height);

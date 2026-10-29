@@ -19,8 +19,6 @@ mod named_selections;
 mod pane_view;
 mod playback;
 mod playback_bar;
-// 下のパネルのタブに組み込む（ROADMAP 6l-i の段階 4）まで、テストだけが使う
-#[allow(dead_code)]
 mod plot;
 mod png_export;
 mod project_tree_pane;

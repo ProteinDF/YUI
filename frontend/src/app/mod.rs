@@ -1667,6 +1667,7 @@ impl Yui {
             // 古いワークスペースの 1 つだけのエディタのタブ。読み込み時に取り除くので、通常は表示されない。
             ViewId::LegacyTextEditor => text("").into(),
             ViewId::ProjectTree => self.project_tree.view().map(Message::ProjectTreePaneMsg),
+            ViewId::Plot(kind) => self.plot_view(kind),
         }
     }
 

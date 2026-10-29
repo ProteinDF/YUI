@@ -82,6 +82,8 @@ pub enum MenuAction {
     ViewToggleEditorSplit,
     /// 2つの分子図の視点の連動のオン・オフ
     ViewToggleCameraLink,
+    /// 散布図のタブを、下のパネルで開く（開いていれば選ぶ）
+    ViewOpenPlot(crate::pane_view::PlotKind),
     /// UI のテーマ（暗い / 明るい）を選ぶ。利用者ごとの設定に保存する
     ViewSetTheme(crate::ui_style::ThemeKind),
     /// 選択の強調の方法（グロー / ハロー / なし）を選ぶ。利用者ごとの設定に保存する

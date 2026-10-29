@@ -1,11 +1,31 @@
 //! 選択の操作（architecture.md 8.9節）。選択の状態は `Yui.selection`（利用者ごと。保存しない）。
 
 use super::Yui;
+use crate::pane_view::PlotKind;
+use crate::plot::{PlotAdapter, sample};
 use crate::selection::{self, ViewportClick};
 use crate::status_bar::StatusMessage;
 use yui_core::selector::Selector;
 
+/// プロットの種類ごとの、点と原子の対応
+fn plot_adapter(kind: PlotKind) -> &'static dyn PlotAdapter {
+    match kind {
+        PlotKind::AtomPositions => &sample::AtomAdapter,
+    }
+}
+
 impl Yui {
+    /// 散布図のタブの中身。データは今の構造から作り、強調する点は今の選択から求める。
+    pub(super) fn plot_view(&self, kind: PlotKind) -> iced::Element<'_, super::Message> {
+        let data = match kind {
+            PlotKind::AtomPositions => sample::atom_positions(&self.state.molecule.atoms),
+        };
+        let highlighted = plot_adapter(kind).keys_for(&self.selection);
+        crate::plot::view(data, highlighted, move |click| {
+            super::Message::PlotClicked(kind, click)
+        })
+    }
+
     /// 分子図の左クリックで、選択を変える。
     ///
     /// 原子のないところのクリックは、修飾キーがなければ選択を外す。ダブルクリックは、クリックした原子の残基全体。
@@ -21,6 +41,12 @@ impl Yui {
         };
         let op = selection::op_from_modifiers(click.shift, click.command);
         selection::apply(&mut self.selection, op, &hit);
+        self.report_selection();
+    }
+
+    /// 散布図のクリックで、選択を変える（3D の選択と同じ状態。修飾キーの扱いも同じ）。
+    pub(super) fn handle_plot_clicked(&mut self, kind: PlotKind, click: &crate::plot::PlotClick) {
+        crate::plot::apply_click(&mut self.selection, click, plot_adapter(kind));
         self.report_selection();
     }
 
@@ -247,5 +273,77 @@ mod tests {
         assert!(!app.selection.is_empty());
         let _ = app.update(Message::MenuAction(crate::menu_bar::MenuAction::FileNew));
         assert!(app.selection.is_empty());
+    }
+
+    /// メニューから開いたプロットのクリックと、3D の選択の連動
+    #[test]
+    fn plot_clicks_and_the_3d_selection_follow_each_other() {
+        use crate::PaneKind;
+        use crate::menu_bar::MenuAction;
+        use crate::pane_view::ViewId;
+        use crate::plot::PlotClick;
+        use yui_core::plot::PlotKey;
+
+        let mut app = app_with_structure();
+        let _ = app.update(Message::MenuAction(MenuAction::ViewOpenPlot(
+            PlotKind::AtomPositions,
+        )));
+        assert_eq!(
+            app.pane_views[&PaneKind::Bottom].active_view(),
+            Some(ViewId::Plot(PlotKind::AtomPositions))
+        );
+
+        let ids: Vec<u32> = app
+            .state
+            .molecule
+            .atoms
+            .iter()
+            .take(3)
+            .map(|a| a.id)
+            .collect();
+        let click = |id: u32, shift: bool, command: bool| {
+            Message::PlotClicked(
+                PlotKind::AtomPositions,
+                PlotClick {
+                    key: Some(PlotKey(u64::from(id))),
+                    shift,
+                    command,
+                },
+            )
+        };
+        // プロットで選ぶと、3D と同じ選択が変わる
+        let _ = app.update(click(ids[0], false, false));
+        assert_eq!(
+            app.selection.iter().copied().collect::<Vec<_>>(),
+            vec![ids[0]]
+        );
+        let _ = app.update(click(ids[1], true, false));
+        assert_eq!(app.selection.len(), 2);
+        let _ = app.update(click(ids[0], false, true));
+        assert_eq!(
+            app.selection.iter().copied().collect::<Vec<_>>(),
+            vec![ids[1]]
+        );
+        // 何もないところのクリックは、選択を外す
+        let _ = app.update(Message::PlotClicked(
+            PlotKind::AtomPositions,
+            PlotClick {
+                key: None,
+                shift: false,
+                command: false,
+            },
+        ));
+        assert!(app.selection.is_empty());
+
+        // 3D で選んだ原子は、プロットの強調になる
+        let _ = app.update(click_on(
+            app.state.molecule.atoms.get(5),
+            false,
+            false,
+            false,
+        ));
+        let keys = plot_adapter(PlotKind::AtomPositions).keys_for(&app.selection);
+        let picked = app.state.molecule.atoms[5].id;
+        assert_eq!(keys, [PlotKey(u64::from(picked))].into());
     }
 }
