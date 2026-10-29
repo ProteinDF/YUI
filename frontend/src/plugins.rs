@@ -808,7 +808,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 同梱のサンプル（`examples/plugins/` の 2 つ）が、そのまま読めて、コマンドも動く。
+    /// 同梱のサンプル（`examples/plugins/` の 3 つ）が、そのまま読めて、コマンドも動く。
     #[test]
     fn the_example_plugins_load_and_their_commands_run() {
         let Some(python) = python_or_skip() else {
@@ -816,7 +816,7 @@ mod tests {
         };
         let dir = scratch("example");
         let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins");
-        for name in ["hello-yui", "atom-info"] {
+        for name in ["hello-yui", "atom-info", "hello-oneshot"] {
             let target = dir.join(name);
             fs::create_dir_all(&target).unwrap();
             for file in ["plugin.yaml", "__init__.py"] {
@@ -825,7 +825,11 @@ mod tests {
             }
         }
 
-        let enabled = vec!["hello-yui".to_string(), "atom-info".to_string()];
+        let enabled = vec![
+            "hello-yui".to_string(),
+            "atom-info".to_string(),
+            "hello-oneshot".to_string(),
+        ];
         let warnings = load_all(&dir, &enabled, Some(&python));
         assert!(warnings.is_empty(), "{warnings:?}");
 
@@ -850,10 +854,25 @@ mod tests {
         )
         .expect("running");
         assert_eq!(wait(atom), Ok(()));
+        // `oneshot` のサンプルは、呼ぶたびに新しいプロセスが動く（プロセスの番号が違う）
+        for _ in 0..2 {
+            let once = invoke(
+                "hello-oneshot",
+                "plugin.hello-oneshot.say",
+                &serde_json::json!({"target": null, "args": {"greeting": "hi"}}),
+            )
+            .expect("running");
+            assert_eq!(wait(once), Ok(()));
+        }
 
         let text = log_text(&dir);
         assert!(text.contains("hello-yui: hi from the View menu"), "{text}");
         assert!(text.contains("atom-info: atom 42"), "{text}");
+        let pids: std::collections::BTreeSet<&str> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("hello-oneshot: hi from the View menu (process "))
+            .collect();
+        assert_eq!(pids.len(), 2, "two calls, two processes: {text}");
         stop_plugin("hello-yui");
         stop_plugin("atom-info");
         let _ = fs::remove_dir_all(&dir);

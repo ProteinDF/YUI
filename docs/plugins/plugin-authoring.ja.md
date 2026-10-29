@@ -118,7 +118,7 @@ menu_items:
   - {location: menu/view, order: 500, label: "Say once", command: plugin.say-once.say, args: {greeting: hi}}
 ```
 
-Python のパッケージは、これまでどおり `register(app)` と `func(ctx, args)` を書きます。`register` は新しいプロセスの中で、コマンドを探すためにだけ呼ばれ、`app.add_menu_item` は無視され、`app.log` は標準エラーに書かれます。Python 以外のプログラムは、`{input}` と `{output}` を含む `command` を書きます（例: `command: [./run, "{input}", "{output}"]`）。YUI は入力ファイル（msgpack の連想配列 1 つ: `v`、`command`、`target`、`args`）を書き、2 つのパスを渡してコマンドを実行し、出力ファイル（msgpack の連想配列 1 つ: `v`、`ok`、`error`、`result`）を読みます。`ok` が偽のとき、またはプログラムが 0 以外で終わったときは、その呼び出しが失敗です。1 回の失敗でプラグインは外されず、理由はステータスバーに出ます。プログラムが標準出力や標準エラーに書いたものは、`plugin.log` に書かれます。呼び出しに時間制限はなく、動いているプロセスは YUI を終えるときに止めます。
+例のプラグイン `examples/plugins/hello-oneshot/` が、その書き方です。呼ぶたびに、プロセスの番号が `plugin.log` に書かれ、毎回違う番号になります。Python のパッケージは、これまでどおり `register(app)` と `func(ctx, args)` を書きます。`register` は新しいプロセスの中で、コマンドを探すためにだけ呼ばれ、`app.add_menu_item` は無視され、`app.log` は標準エラーに書かれます。Python 以外のプログラムは、`{input}` と `{output}` を含む `command` を書きます（例: `command: [./run, "{input}", "{output}"]`）。YUI は入力ファイル（msgpack の連想配列 1 つ: `v`、`command`、`target`、`args`）を書き、2 つのパスを渡してコマンドを実行し、出力ファイル（msgpack の連想配列 1 つ: `v`、`ok`、`error`、`result`）を読みます。`ok` が偽のとき、またはプログラムが 0 以外で終わったときは、その呼び出しが失敗です。1 回の失敗でプラグインは外されず、理由はステータスバーに出ます。プログラムが標準出力や標準エラーに書いたものは、`plugin.log` に書かれます。呼び出しに時間制限はなく、動いているプロセスは YUI を終えるときに止めます。
 
 ## 失敗と plugin.log
 
