@@ -24,6 +24,9 @@ pub enum PlotKind {
     AtomPositions,
     /// 残基ごとの主鎖の二面角（φ と ψ）。点をクリックすると、その残基を選ぶ。
     Ramachandran,
+    /// `ProteinDF_pytools` が書いた JSON のグラフ（File → Open Plot (pytools JSON)...）。
+    /// データはファイルから来るので、View メニューには出さない（`ALL` に入れない）。
+    Pytools,
 }
 
 impl PlotKind {
@@ -33,6 +36,7 @@ impl PlotKind {
         match self {
             PlotKind::AtomPositions => "Plot: Atom Positions",
             PlotKind::Ramachandran => "Ramachandran Plot",
+            PlotKind::Pytools => "Plot (pytools)",
         }
     }
 
@@ -41,6 +45,7 @@ impl PlotKind {
         match self {
             PlotKind::AtomPositions => "atom_positions",
             PlotKind::Ramachandran => "ramachandran",
+            PlotKind::Pytools => "pytools",
         }
     }
 

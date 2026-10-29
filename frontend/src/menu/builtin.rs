@@ -98,6 +98,7 @@ fn menu(action: MenuAction) -> impl Fn() -> Message {
 /// | `file.new` `file.open` `file.save` `file.save_as` `file.export_structure` `file.export_image_svg` `file.export_image_png` `file.export_animation` | なし | `MenuAction::FileNew` など |
 /// | `file.new_text_file` `file.open_text_file` `file.open_settings` `file.share_session` `file.quit` | なし | `MenuAction::FileNewTextFile` など |
 /// | `file.open_trajectory` `file.close_trajectory` | なし | `MenuAction::FileOpenTrajectory` / `FileCloseTrajectory` |
+/// | `file.open_plot` | なし | `MenuAction::FileOpenPlot` |
 /// | `file.open_cube` `file.close_cube` | なし | `MenuAction::FileOpenCube` / `FileCloseCube` |
 /// | `view.reset_camera` `view.toggle_editor_split` `view.toggle_camera_link` | なし | `MenuAction::ViewResetCamera` など |
 /// | `view.set_background_color` | `color: [f32; 4]` | `MenuAction::ViewSetBackgroundColor` |
@@ -132,6 +133,7 @@ pub fn register_menu_commands(reg: &mut CommandRegistry) {
         ("file.open_text_file", MenuAction::FileOpenTextFile),
         ("file.open_trajectory", MenuAction::FileOpenTrajectory),
         ("file.close_trajectory", MenuAction::FileCloseTrajectory),
+        ("file.open_plot", MenuAction::FileOpenPlot),
         ("file.open_cube", MenuAction::FileOpenCube),
         ("file.close_cube", MenuAction::FileCloseCube),
         ("file.open_settings", MenuAction::FileOpenSettings),
@@ -495,6 +497,8 @@ fn register_file_menu(menus: &mut MenuRegistry) {
                 )
                 .enabled(ctx.has_cube),
             ),
+            MenuItem::Separator,
+            dropdown_item("Open Plot (pytools JSON)...", "file.open_plot"),
         ]
     });
     menus.contribute(FILE, 200, |_| {
@@ -1124,6 +1128,8 @@ mod tests {
             "Open CUBE (Isosurface)...",
             "Close CUBE [disabled]",
             "---",
+            "Open Plot (pytools JSON)...",
+            "---",
             "New Text File",
             "Open Text File...",
         ];
@@ -1337,6 +1343,7 @@ mod tests {
             ("Close Trajectory", m("FileCloseTrajectory")),
             ("Open CUBE (Isosurface)...", m("FileOpenCube")),
             ("Close CUBE", m("FileCloseCube")),
+            ("Open Plot (pytools JSON)...", m("FileOpenPlot")),
             ("New Text File", m("FileNewTextFile")),
             ("Open Text File...", m("FileOpenTextFile")),
         ];

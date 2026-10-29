@@ -3,6 +3,7 @@ mod editor;
 pub mod message;
 mod movie_ops;
 mod playback_ops;
+mod pytools_ops;
 mod selection_ops;
 mod trajectory_ops;
 mod update;
@@ -199,6 +200,10 @@ pub struct Yui {
     pub(super) surface_follow_pending: bool,
     /// Ramachandran プロットの点のキャッシュ（構造が変わったときだけ作り直す）
     pub(super) ramachandran_cache: std::cell::RefCell<Option<selection_ops::RamachandranCache>>,
+    /// 開いている pytools のグラフ（利用者ごと。ワークスペースには保存しない）
+    pub(super) pytools_plot: Option<pytools_ops::PytoolsPlotState>,
+    /// pytools の原子と今の構造の対応のキャッシュ（構造の原子の数かモデルが変わったときだけ作り直す）
+    pub(super) pytools_map_cache: std::cell::RefCell<Option<pytools_ops::PytoolsMapCache>>,
 
     /// 現在開いている・保存したワークスペースファイルのパス（ネイティブのみ有効）
     pub(super) current_workspace_path: Option<PathBuf>,
@@ -344,6 +349,8 @@ impl Default for Yui {
             surface_generating: false,
             surface_follow_pending: false,
             ramachandran_cache: std::cell::RefCell::new(None),
+            pytools_plot: None,
+            pytools_map_cache: std::cell::RefCell::new(None),
             current_workspace_path: None,
             current_workspace_file_name: None,
         }
