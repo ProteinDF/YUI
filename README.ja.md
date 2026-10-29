@@ -162,6 +162,23 @@ YUI_WEB_ROOT=target/web/dist cargo run --release -p yui-backend
 状態を変えることもできません）。*Host* の秘密を渡した相手は、ターミナル（任意のコマンドの実行）を開き、ワークスペースの
 ルートの下のファイルを読めます。`architecture.ja.md` 7.4節を参照してください。
 
+### Windows でのビルド（未確認）
+
+ネイティブ版は MSVC のツールチェーンでビルドします。開発者は、まだ Windows で動かしていません。問題があれば知らせてください。
+
+1. [Rust](https://rustup.rs) を、既定の MSVC のツールチェーンで入れます。あわせて、Visual Studio Build Tools の「C++ によるデスクトップ開発」を入れます。
+2. Git を入れます（`proteindf-bridge` の依存を GitHub から取得するため）。
+3. PowerShell で、次を実行します。
+   ```powershell
+   git clone https://github.com/ProteinDF/YUI.git
+   cd YUI
+   git checkout develop
+   cargo run --bin yui-frontend
+   ```
+4. GPU は Vulkan か DirectX 12 が使えれば足ります。新しいグラフィックスドライバーで足ります。
+5. 利用者ごとの設定とプラグインは、`%APPDATA%\yui\`（`settings.yaml`、`plugins\`）にあります。
+6. セットアップの `.exe` を作る場合は、`cargo install cargo-packager --locked` のあと、`cargo packager --release -f nsis` を実行します。結果は `target\packager\` に出ます。`scripts/build-installers.sh` は bash 用なので、PowerShell では `cargo packager` を直接実行します。
+
 ### インストーラー（ネイティブ）
 
 ```bash

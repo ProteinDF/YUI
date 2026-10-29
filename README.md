@@ -162,6 +162,23 @@ file APIs closed unless `YUI_ENABLE_TERMINAL=1` / `YUI_ENABLE_FS=1`). Share a se
 *Host* secret to can open the terminal (arbitrary commands) and read files under the workspace root. See
 `architecture.md` §7.4.
 
+### Building on Windows (not verified)
+
+The native app builds with the MSVC toolchain. The developers have not run it on Windows yet, so please report any problem you meet.
+
+1. Install [Rust](https://rustup.rs) with the default MSVC toolchain, and the "Desktop development with C++" workload of the Visual Studio Build Tools.
+2. Install Git (the `proteindf-bridge` dependency is fetched from GitHub).
+3. In PowerShell:
+   ```powershell
+   git clone https://github.com/ProteinDF/YUI.git
+   cd YUI
+   git checkout develop
+   cargo run --bin yui-frontend
+   ```
+4. The GPU needs Vulkan or DirectX 12; a current graphics driver is enough.
+5. The per-user settings and the plugins are in `%APPDATA%\yui\` (`settings.yaml`, `plugins\`).
+6. For the setup `.exe`: `cargo install cargo-packager --locked`, then `cargo packager --release -f nsis`. The result is in `target\packager\`. `scripts/build-installers.sh` is a bash script, so from PowerShell run the `cargo packager` command directly.
+
 ### Installers (native)
 
 ```bash
