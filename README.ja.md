@@ -162,9 +162,9 @@ YUI_WEB_ROOT=target/web/dist cargo run --release -p yui-backend
 状態を変えることもできません）。*Host* の秘密を渡した相手は、ターミナル（任意のコマンドの実行）を開き、ワークスペースの
 ルートの下のファイルを読めます。`architecture.ja.md` 7.4節を参照してください。
 
-### Windows でのビルド（未確認）
+### Windows でのビルド（ビルドと起動を確認）
 
-ネイティブ版は MSVC のツールチェーンでビルドします。開発者は、まだ Windows で動かしていません。問題があれば知らせてください。
+ネイティブ版は MSVC のツールチェーンでビルドします。Windows で、ビルドと起動を確認しました。そのほかの機能（プラグイン、インストーラー、ターミナル）は、Windows ではまだ確認していません。問題があれば知らせてください。
 
 1. [Rust](https://rustup.rs) を、既定の MSVC のツールチェーンで入れます。あわせて、Visual Studio Build Tools の「C++ によるデスクトップ開発」を入れます。
 2. Git を入れます（`proteindf-bridge` の依存を GitHub から取得するため）。
