@@ -48,6 +48,8 @@ mod svg_export;
 mod terminal_grid;
 mod terminal_pane;
 mod terminal_widget;
+#[cfg(test)]
+mod test_gpu;
 mod text_editor_pane;
 mod trajectory;
 mod ui_style;

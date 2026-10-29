@@ -381,6 +381,7 @@ mod tests {
         #[test]
         fn the_list_shows_each_plugin_its_state_and_the_notice() {
             let rows = sample_rows();
+            let _gpu = crate::test_gpu::lock();
             let mut ui = iced_test::simulator(modal(&rows));
             for text in [
                 "hello-yui",
@@ -402,6 +403,7 @@ mod tests {
         #[test]
         fn pressing_disable_sends_that_plugins_name() {
             let rows = sample_rows();
+            let _gpu = crate::test_gpu::lock();
             let mut ui = iced_test::simulator(modal(&rows));
             ui.click("Disable")
                 .expect("the Disable button is on screen");
@@ -412,6 +414,7 @@ mod tests {
         #[test]
         fn pressing_close_sends_close() {
             let rows = sample_rows();
+            let _gpu = crate::test_gpu::lock();
             let mut ui = iced_test::simulator(modal(&rows));
             ui.click("Close").expect("the Close button is on screen");
             let messages: Vec<Msg> = ui.into_messages().collect();
@@ -426,6 +429,7 @@ mod tests {
                 return;
             };
             let rows = sample_rows();
+            let _gpu = crate::test_gpu::lock();
             let mut ui = iced_test::simulator(modal(&rows));
             let snapshot = ui.snapshot(&iced::Theme::Dark).expect("take a snapshot");
             let base = std::path::Path::new(&dir).join("plugin-list");

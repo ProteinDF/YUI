@@ -79,6 +79,7 @@ fn diff_pixels(base: &[u8], img: &[u8]) -> usize {
 
 #[test]
 fn representations_draw_expected_pixels() {
+    let _gpu = crate::test_gpu::lock();
     let Ok(gpu) = block_on(request_gpu()) else {
         eprintln!("headless: skipped (no wgpu adapter found; see TESTING.md section 7)");
         return;
