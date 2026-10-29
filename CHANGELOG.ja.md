@@ -10,7 +10,7 @@
 ## [Unreleased]
 
 ### 変更
-- Python プラグインを、アプリの中ではなく、YUI が起動・終了する別のプロセスで動かすようにした。プラグインが落ちても、止まっても、YUI は止まらない。`--features python` も `libpython` も要らなくなった。プラグインは、`settings.yaml` の `plugins.python`、なければ `PATH` の `python3` で動く。作者向けの API（`register(app)`、`app.log`、`app.add_command`、`app.add_menu_item`、`ctx.target`）は変わらない。プラグインの `print()` は `plugin.log` に書かれる。`plugin.yaml` に `command` があるプラグインは、そのまま実行する（どの言語でもよい）。`architecture.ja.md` 6.4節を参照。
+- Python プラグインを、アプリの中ではなく、YUI が起動・終了する別のプロセスで動かすようにした。プラグインが落ちても、止まっても、YUI は止まらない。`--features python` も `libpython` も要らなくなった。プラグインは、`settings.yaml` の `plugins.python`、なければ `PATH` の `python3` で動く。作者向けの API（`register(app)`、`app.log`、`app.add_command`、`app.add_menu_item`、`ctx.target`）は変わらない。プラグインの `print()` は `plugin.log` に書かれる。`plugin.yaml` に `command` があるプラグインは、そのまま実行する（どの言語でもよい）。`architecture.ja.md` 6.4節を参照。手で確かめたのは、macOS ではプラグインの読み込み、プラグインの一覧、右クリックのメニューからのコマンドで、Windows ではアプリのビルドと起動だけ。`oneshot` の方式は、自動テストでだけ動かしていて、アプリの画面からはまだ確かめていない。
 - アプリの名前を、タイトルとバージョン情報では「YUI」にした。ウィンドウのタイトル、About ダイアログとそのメニュー項目、Web ページのタイトルとバッジ、backend のコンソールの表示、インストーラーの説明、README・ROADMAP・architecture・TESTING の見出しから「結」の字をなくした。ドキュメント本文の「結 (YUI)」の表記は変えていない。
 
 ### 追加
