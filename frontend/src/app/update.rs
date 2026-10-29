@@ -382,6 +382,9 @@ impl Yui {
             Message::ClearSelection => {
                 self.clear_selection();
             }
+            Message::PytoolsPlotOpened(result) => {
+                self.handle_pytools_plot_opened(result);
+            }
             Message::TrajectoryOpened(result) => {
                 task = self.handle_trajectory_opened(result);
             }
@@ -969,6 +972,13 @@ impl Yui {
                 return Task::perform(
                     crate::trajectory::open_trajectory_dialog(),
                     Message::TrajectoryOpened,
+                );
+            }
+            MenuAction::FileOpenPlot => {
+                self.active_menu = None;
+                return Task::perform(
+                    super::pytools_ops::open_plot_dialog(),
+                    Message::PytoolsPlotOpened,
                 );
             }
             MenuAction::FileOpenCube => {

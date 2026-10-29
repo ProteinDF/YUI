@@ -60,6 +60,8 @@ pub enum MenuAction {
     FileOpenTrajectory,
     /// 開いている軌跡を閉じ、構造を軌跡を開く前の座標に戻す
     FileCloseTrajectory,
+    /// pytools が書いたグラフの JSON を選んで、下のパネルのタブに出す
+    FileOpenPlot,
     /// Gaussian CUBE ファイルを選んで、等値面を表示する
     FileOpenCube,
     /// 開いている CUBE の等値面を閉じる

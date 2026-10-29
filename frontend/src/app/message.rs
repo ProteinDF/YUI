@@ -223,6 +223,9 @@ pub enum Message {
     ViewportClicked(crate::selection::ViewportClick),
     /// 散布図の左クリック（点、または何もないところ）。選択を変える。
     PlotClicked(crate::pane_view::PlotKind, crate::plot::PlotClick),
+    /// pytools のグラフ（JSON）を開いた結果（File → Open Plot (pytools JSON)...）。
+    /// `(ファイル名, JSON の文字列)`。キャンセルは `Ok(None)`
+    PytoolsPlotOpened(Result<Option<(String, String)>, String>),
     /// 軌跡を開いた結果（File → Open Trajectory...、Project タブ）。キャンセルは `Ok(None)`
     TrajectoryOpened(
         Result<Option<std::sync::Arc<yui_core::xyz_trajectory::XyzTrajectory>>, String>,

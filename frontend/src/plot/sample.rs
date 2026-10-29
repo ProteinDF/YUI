@@ -44,6 +44,19 @@ impl PlotAdapter for AtomAdapter {
     }
 }
 
+/// どの原子にも対応しない点（まだ連動していないプロット用）
+pub struct NoAtoms;
+
+impl PlotAdapter for NoAtoms {
+    fn selection_for(&self, _key: PlotKey) -> Vec<u32> {
+        Vec::new()
+    }
+
+    fn keys_for(&self, _selection: &BTreeSet<u32>) -> BTreeSet<PlotKey> {
+        BTreeSet::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,6 +24,8 @@ impl Yui {
             PlotKind::Ramachandran => Box::new(ramachandran::RamachandranAdapter::new(
                 self.ramachandran_points(),
             )),
+            // 点と原子の連動は次の段階。それまでは、クリックしても何も選ばない
+            PlotKind::Pytools => Box::new(sample::NoAtoms),
         }
     }
 
@@ -64,6 +66,7 @@ impl Yui {
                 let data = sample::atom_positions(&self.state.molecule.atoms);
                 crate::plot::view(data, highlighted(&sample::AtomAdapter), on_click)
             }
+            PlotKind::Pytools => self.pytools_plot_view(),
             PlotKind::Ramachandran => {
                 let points = self.ramachandran_points();
                 let plot = ramachandran_plot(&points);
@@ -113,6 +116,9 @@ impl Yui {
 
     /// 散布図のクリックで、選択を変える（3D の選択と同じ状態。修飾キーの扱いも同じ）。
     pub(super) fn handle_plot_clicked(&mut self, kind: PlotKind, click: &crate::plot::PlotClick) {
+        if kind == PlotKind::Pytools {
+            return;
+        }
         let adapter = self.plot_adapter(kind);
         crate::plot::apply_click(&mut self.selection, click, adapter.as_ref());
         self.report_selection();
