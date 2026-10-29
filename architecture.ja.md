@@ -729,7 +729,7 @@ UI には、**暗い**（既定。テーマができる前の見た目）と**�
 - **新フォーマット対応:** **PDBx/mmCIF** を正式な主力フォーマットとして堅牢にサポートする。レガシーPDB形式はカラム桁数制約により原子数99,999件・特定のチェーンID表現等にハード上限があり、4.2節の「最大約100万原子」目標と両立しない。既存 `ProteinDF_bridge/mmcif.py` は `SimpleMmcif` という名の通り簡易実装であるため、`proteindf-bridge` では大規模構造を確実に往復できるレベルまで堅牢化する（詳細仕様はproteindf-bridge側の `SPEC.md` で定義）。
 - **ProteinDF計算結果I/Oの統合:** 構造データ（`ProteinDF_bridge`由来）とは別に、ProteinDFの計算結果（`pdfparam.h5`: 基底関数系・MO係数行列・軌道エネルギー・Mulliken電荷等のポピュレーション解析）を扱う既存Pythonライブラリ **`ProteinDF_pytools`**（`orbinfo.py`, `matrix.py`/`vector.py`, `basisset.py`/`basis2.py`, `pdfparam_hdf5.py`, `poputils.py` 等）も `proteindf-bridge` に統合し、Rust側でHDF5読み込み（`hdf5-metno`クレート等）に対応する。
 - **Cubeファイル対応はパーサのみで良い:** ProteinDF本体のC++ツール（`pdf-mkfld-dens`/`pdf-mkfld-mo`/`pdf-mkfld-esp`, 実装は `src/tools/mkfld_common.cpp` の `saveCubeData()`）が標準Gaussian CUBE形式でファイル出力する仕組みを既に持つため、`proteindf-bridge`側でGTOをグリッド展開してcubeを生成する処理は**不要**。標準Gaussian CUBEファイルの読み込みパーサ（4.5節の等値面パイプラインへの入力）のみを実装すればよい。
-- **本リポジトリでの扱い:** 本プロジェクトの `core`（および `frontend` の `dev-dependencies`）からは、`proteindf-bridge` をGit依存（リリースタグ `tag = "2026.10.7"` 指定、将来的にはcrates.io）として参照し、`renderer-native` は直接依存しない。詳細設計・実装は `../ProteinDF_bridge/RUST_PORT_SPEC.md` で管理する。
+- **本リポジトリでの扱い:** 本プロジェクトの `core`（および `frontend` の `dev-dependencies`）からは、`proteindf-bridge` をGit依存（リリースタグ `tag = "2026.10.20"` 指定、将来的にはcrates.io）として参照し、`renderer-native` は直接依存しない。詳細設計・実装は `../ProteinDF_bridge/RUST_PORT_SPEC.md` で管理する。
 
 ### 10.1 二次構造推定（DSSP相当）
 

@@ -209,7 +209,7 @@ scripts/build-installers.sh          # このマシンの OS 向け: Linux は .
 
 ### ローカルの `proteindf-bridge` で上書き開発する場合
 
-本リポジトリは既定で GitHub 上の Git リリースタグ（`tag = "2026.10.1"`）から `proteindf-bridge` を取得します。ローカルマシン上で `proteindf-bridge` を同時に変更しながら開発したい場合は、Cargo の `[patch]` 機能を利用して差し替えることができます。
+本リポジトリは既定で GitHub 上の Git リリースタグ（`tag = "2026.10.20"`）から `proteindf-bridge` を取得します。ローカルマシン上で `proteindf-bridge` を同時に変更しながら開発したい場合は、Cargo の `[patch]` 機能を利用して差し替えることができます。
 
 各自のユーザー単位設定（例: `~/.cargo/config.toml`）に以下を記述するか、`cargo` 実行時に `--config` オプションで一時的に指定してください:
 

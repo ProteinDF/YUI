@@ -17,8 +17,8 @@ zstd = "0.14"
 rayon = "1.12"
 tokio = { version = "1", features = ["full"] }
 # proteindf-bridge release tag containing §3.14 (AtomGroup::setup()) and mmCIF export.
-proteindf-bridge = { git = "https://github.com/ProteinDF/ProteinDF_bridge.git", tag = "2026.10.7", default-features = false, features = ["zstd"] }
+proteindf-bridge = { git = "https://github.com/ProteinDF/ProteinDF_bridge.git", tag = "2026.10.20", default-features = false, features = ["zstd"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # proteindf-bridge release tag containing §3.14 (AtomGroup::setup()) and mmCIF export.
-proteindf-bridge = { git = "https://github.com/ProteinDF/ProteinDF_bridge.git", tag = "2026.10.7", default-features = false, features = ["ruzstd"] }
+proteindf-bridge = { git = "https://github.com/ProteinDF/ProteinDF_bridge.git", tag = "2026.10.20", default-features = false, features = ["ruzstd"] }
