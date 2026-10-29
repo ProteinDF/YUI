@@ -5,7 +5,7 @@
 #   1. installs the system packages (needs sudo)
 #   2. shows whether a Vulkan GPU driver is visible
 #   3. builds yui-frontend
-#   4. creates ~/yui-check/config with the example plugin enabled, for XDG_CONFIG_HOME
+#   4. creates ~/yui-check/config with the example plugins enabled, for XDG_CONFIG_HOME
 #
 # Usage:
 #   scripts/setup-gui-check.sh [--skip-apt] [--dry-run]
@@ -94,15 +94,21 @@ fi
 step "5. Check folder (~/yui-check, not your own settings)"
 CHECK="$HOME/yui-check/config"
 if [[ $DRY_RUN -eq 1 ]]; then
-    echo "[dry-run] create $CHECK/yui/plugins, copy examples/plugins/hello-yui, write settings.yaml"
+    echo "[dry-run] create $CHECK/yui/plugins, copy examples/plugins/*, write settings.yaml"
 else
     mkdir -p "$CHECK/yui/plugins"
-    rm -rf "$CHECK/yui/plugins/hello-yui"
-    cp -r examples/plugins/hello-yui "$CHECK/yui/plugins/"
-    printf 'plugins:\n  enabled: [hello-yui]\n' > "$CHECK/yui/settings.yaml"
+    ENABLED=""
+    for example in examples/plugins/*/; do
+        name="$(basename "$example")"
+        rm -rf "$CHECK/yui/plugins/$name"
+        cp -r "$example" "$CHECK/yui/plugins/"
+        ENABLED="${ENABLED:+$ENABLED, }$name"
+    done
+    printf 'plugins:\n  enabled: [%s]\n' "$ENABLED" > "$CHECK/yui/settings.yaml"
 fi
 
 echo
 echo "Done. Start the app with the check folder:"
 echo "  XDG_CONFIG_HOME=\"$CHECK\" ./target/debug/yui-frontend"
-echo "Then open View > Plugins... and check the list: the state of hello-yui, the layout, and Disable."
+echo "Then open View > Plugins... and check the list (the state of each example, the layout, Disable),"
+echo "View > Say hello / Say hello (oneshot), and the right-click items on the 3D view (plugin.log shows the result)."

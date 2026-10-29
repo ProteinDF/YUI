@@ -1,0 +1,9 @@
+name: hello-oneshot
+version: 0.1.0
+api_version: 1
+description: Adds View > Say hello (oneshot), which starts a new process for each call and writes a line to plugin.log.
+author: YUI project
+mode: oneshot
+menu_items:
+  - {location: menu/view, order: 600, label: "Say hello (oneshot)", command: plugin.hello-oneshot.say, args: {greeting: hello}}
+  - {location: context/viewport, order: 200, label: "Say hello about this (oneshot)", command: plugin.hello-oneshot.say, args: {greeting: hello}}
