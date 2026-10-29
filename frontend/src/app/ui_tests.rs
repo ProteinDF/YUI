@@ -22,6 +22,7 @@ fn app_with_structure() -> Yui {
 /// 画面にある、`text` を含むウィジェットをクリックして、出てきたメッセージをアプリに渡す。
 /// 見つからない、または押せないときは `false`。
 fn click(app: &mut Yui, text: &str) -> bool {
+    let _gpu = crate::test_gpu::lock();
     let mut ui = iced_test::simulator(app.view());
     if ui.click(text).is_err() {
         return false;
@@ -56,6 +57,7 @@ fn nth_text(
 /// 画面にある、文字が `text` のウィジェットのうち、`n` 番目をクリックする。
 /// 「▶」のように、同じ文字のボタンが画面のあちこちにあるときに使う。
 fn click_nth(app: &mut Yui, text: &str, n: usize) -> bool {
+    let _gpu = crate::test_gpu::lock();
     let mut ui = iced_test::simulator(app.view());
     if ui.click(nth_text(text, n)).is_err() {
         return false;
@@ -69,6 +71,7 @@ fn click_nth(app: &mut Yui, text: &str, n: usize) -> bool {
 
 /// 画面にある、文字が `text` のウィジェットの数
 fn count(app: &Yui, text: &str) -> usize {
+    let _gpu = crate::test_gpu::lock();
     let mut ui = iced_test::simulator(app.view());
     (1..=200)
         .take_while(|&n| ui.find(nth_text(text, n)).is_ok())
@@ -83,6 +86,8 @@ fn click_last(app: &mut Yui, text: &str) -> bool {
 
 /// 画面に、`text` を含むウィジェットがあるか
 fn visible(app: &Yui, text: &str) -> bool {
+    let _gpu = crate::test_gpu::lock();
+    // edition 2024 では、末尾の式の一時値（描画器）が、ロックより先に壊れる
     iced_test::simulator(app.view()).find(text).is_ok()
 }
 
@@ -92,6 +97,7 @@ fn shot(app: &Yui, name: &str) {
     let Ok(dir) = std::env::var("YUI_UI_SHOTS_DIR") else {
         return;
     };
+    let _gpu = crate::test_gpu::lock();
     let mut ui = iced_test::simulator(app.view());
     if let Ok(snapshot) = ui.snapshot(&app.theme()) {
         // 既にあれば比べるだけで書き換えないので、実行ごとに消す
