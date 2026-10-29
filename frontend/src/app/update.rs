@@ -376,6 +376,9 @@ impl Yui {
             Message::ViewportClicked(click) => {
                 self.handle_viewport_clicked(click);
             }
+            Message::PlotClicked(kind, click) => {
+                self.handle_plot_clicked(kind, &click);
+            }
             Message::ClearSelection => {
                 self.clear_selection();
             }
@@ -905,6 +908,15 @@ impl Yui {
                     PaneKind::Group(_) => {}
                 }
                 self.rebuild_pane_grid();
+            }
+            MenuAction::ViewOpenPlot(kind) => {
+                self.active_menu = None;
+                // 下のパネルが隠れていると、開いたタブが見えない
+                if !self.show_bottom {
+                    self.show_bottom = true;
+                    self.rebuild_pane_grid();
+                }
+                crate::pane_view::open_plot_tab(&mut self.pane_views, kind);
             }
             MenuAction::ViewToggleEditorSplit => {
                 self.active_menu = None;

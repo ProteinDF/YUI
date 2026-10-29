@@ -171,9 +171,9 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 - **フェーズ6k-v — プラグインを別のプロセスで動かす（`resident` は完了）。** メッセージのプロトコル（長さ付きの msgpack）、YUI が起動・終了する子プロセス、何も入れなくてよい Python のランナー（`msgpack` のパッケージがあればそれを使う）、`settings.yaml` の `plugins.python`、`plugin.yaml` の `mode` と `command`。`--features python` は要らなくなった。
 - **フェーズ6k-vi — `oneshot` の方式（完了）。** コマンドを呼ぶたびに新しいプロセスを起動する。メニュー項目とコマンドは `plugin.yaml` に書く（`menu_items`、`commands`）。入力と出力は msgpack のファイル（`{input}`、`{output}`）。Python のパッケージは、ランナーで `register(app)` のまま書ける。1 回の失敗でプラグインは外さない。Python 以外の言語向けのプロトコルの手引き（`docs/plugins/plugin-protocol.ja.md`）と、例（`examples/protocol/raw-python`）。
 
-### フェーズ6l — グラフと 3D 表示の連動（計画）
+### フェーズ6l — グラフと 3D 表示の連動（進行中）
 計算結果のグラフで、グラフの点を選ぶと 3D 表示でも選ばれ、その逆もできるようにする。
-- **フェーズ6l-i — 汎用の散布図と、点の選択。** 下のペインのグラフのタブ、`core` のグラフのデータ型、点のクリックで原子を選ぶ（3D 表示と同じ選択）。
+- **フェーズ6l-i — 汎用の散布図と、点の選択（完了）。** 下のペインのグラフのタブ、`core` のグラフのデータ型、点のクリックで原子を選ぶ（3D 表示と同じ選択）。開発用のサンプル（View →「Plot: Atom Positions」）が使っている。本物のグラフは、6l-ii と 6l-iii で足す。
 - **フェーズ6l-ii — `ProteinDF_pytools` のグラフ。** `ProteinDF_pytools` が書くグラフの JSON を読み、点を原子に結びつけ（原子の数と座標で確かめる）、両方向に選べるようにする。点が原子でないグラフ（軌道、エネルギー準位）は、あとで扱う。
 - **フェーズ6l-iii — Ramachandran プロット。** φ/ψ のプロットから残基を選ぶ。
 
@@ -189,7 +189,7 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 ---
 
 ### 推奨着手順
-完了: `6g → 6i → 5c（5c-iii を除く）→ 6j → 6k`。次: `6l`（グラフと 3D 表示の連動）、続いて Python コンソール（`6h`。方式を決め直してから）、AI チャット（`6b`）、`7`、`8`。`7` は `proteindf-bridge` 待ち。`5c-iii`（表面の抽出の GPU への移植）と、描画の間引きの第 3 段（遠距離は表面だけ）は、いつでもできる。
+完了: `6g → 6i → 5c（5c-iii を除く）→ 6j → 6k → 6l-i`。次: `6l-ii` と `6l-iii`（グラフと 3D 表示の連動）、続いて Python コンソール（`6h`。方式を決め直してから）、AI チャット（`6b`）、`7`、`8`。`7` は `proteindf-bridge` 待ち。`5c-iii`（表面の抽出の GPU への移植）と、描画の間引きの第 3 段（遠距離は表面だけ）は、いつでもできる。
 
 ### proteindf-bridge 側への依頼事項
 - **Gaussian CUBEパーサ（提供済み）:** `proteindf-bridge` 2026.10.5 にあり、フェーズ5c-ivが使っている。実際の ProteinDF の CUBE は、まだ試していない。

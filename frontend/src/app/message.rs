@@ -221,6 +221,8 @@ pub enum Message {
     TerminalPasteText(Option<String>),
     /// 分子図の左クリック（ほとんど動かさずに離した）。選択を変える。
     ViewportClicked(crate::selection::ViewportClick),
+    /// 散布図の左クリック（点、または何もないところ）。選択を変える。
+    PlotClicked(crate::pane_view::PlotKind, crate::plot::PlotClick),
     /// 軌跡を開いた結果（File → Open Trajectory...、Project タブ）。キャンセルは `Ok(None)`
     TrajectoryOpened(
         Result<Option<std::sync::Arc<yui_core::xyz_trajectory::XyzTrajectory>>, String>,

@@ -171,9 +171,9 @@ Designed in `architecture.md` §6.4: developers outside the project add features
 - **Phase 6k-v — Plugins as separate processes (Complete for `resident` plugins).** The message protocol (msgpack with a length prefix), child processes that YUI starts and stops, a Python runner that needs nothing installed (it uses the `msgpack` package when present), `plugins.python` in `settings.yaml`, and `mode` / `command` in `plugin.yaml`. Builds no longer need `--features python`.
 - **Phase 6k-vi — The `oneshot` mode (Complete).** A new process for each command call; the menu items and commands in `plugin.yaml` (`menu_items`, `commands`); `{input}` / `{output}` files in msgpack; a Python package keeps `register(app)` through the runner; one failed call does not disable the plugin. A guide to the protocol for other languages (`docs/plugins/plugin-protocol.md`) and an example (`examples/protocol/raw-python`).
 
-### Phase 6l — Plots linked with the 3D view (Planned)
+### Phase 6l — Plots linked with the 3D view (In progress)
 Graphs of calculation results whose points can be selected in the plot and in the 3D view, and the other way round.
-- **Phase 6l-i — A generic scatter plot with point selection.** A plot tab in the bottom pane, a plot data type in `core`, and clicking points selects atoms (the same selection as in the 3D view).
+- **Phase 6l-i — A generic scatter plot with point selection (Complete).** A plot tab in the bottom pane, a plot data type in `core`, and clicking points selects atoms (the same selection as in the 3D view). A development sample (View → "Plot: Atom Positions") uses it; real graphs come with 6l-ii and 6l-iii.
 - **Phase 6l-ii — Graphs from `ProteinDF_pytools`.** Read the plot JSON that `ProteinDF_pytools` writes, link each point to an atom (checked by the number of atoms and their coordinates), and select in both directions. Graphs whose points are not atoms (orbitals, energy levels) come later.
 - **Phase 6l-iii — Ramachandran plot.** Select residues from the φ/ψ plot.
 
@@ -189,7 +189,7 @@ Graphs of calculation results whose points can be selected in the plot and in th
 ---
 
 ### Recommended Execution Order
-Done: `6g → 6i → 5c (except 5c-iii) → 6j → 6k`. Next: `6l` (plots linked with the 3D view), then the Python console (`6h`, after its design is decided again), the AI chat (`6b`), `7` and `8`. `7` waits for `proteindf-bridge`; `5c-iii` (the GPU port of the surface extraction) and the third LOD tier (surface only at long range) can be done at any time.
+Done: `6g → 6i → 5c (except 5c-iii) → 6j → 6k → 6l-i`. Next: `6l-ii` and `6l-iii` (graphs linked with the 3D view), then the Python console (`6h`, after its design is decided again), the AI chat (`6b`), `7` and `8`. `7` waits for `proteindf-bridge`; `5c-iii` (the GPU port of the surface extraction) and the third LOD tier (surface only at long range) can be done at any time.
 
 ### Requests to `proteindf-bridge` Upstream
 - **Gaussian CUBE parser (available):** `proteindf-bridge` 2026.10.5 has it and Phase 5c-iv uses it; real ProteinDF CUBE files are still to be tried.

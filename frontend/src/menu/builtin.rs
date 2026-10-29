@@ -21,6 +21,10 @@ struct BackgroundArgs {
     color: [f32; 4],
 }
 #[derive(Deserialize)]
+struct PlotArgs {
+    kind: String,
+}
+#[derive(Deserialize)]
 struct ThemeArgs {
     theme: String,
 }
@@ -104,6 +108,7 @@ fn menu(action: MenuAction) -> impl Fn() -> Message {
 /// | `camera.toggle_spin` `camera.toggle_rock` `camera.cycle_spin_speed` `camera.zoom_to_selection` | なし | `Message::CameraAction(CameraAction::*)` |
 /// | `selection.clear` `selection.save_as_named` | なし | `Message::ClearSelection` / `Message::SaveSelectionAsNamed` |
 /// | `view.toggle_pane` | `pane: PaneKind` | `MenuAction::ViewTogglePane` |
+/// | `view.open_plot` | `kind: "atom_positions"` | `MenuAction::ViewOpenPlot` |
 /// | `help.about` | なし | `MenuAction::HelpAbout` |
 /// | `viewport.select_atom` `viewport.hide_atom` `viewport.save_atom_as_named_selection` | `atom_id` | `ContextMenuAction::SelectAtom` など |
 /// | `viewport.select_residue` `viewport.save_residue_as_named_selection` | `chain_id`, `residue_id` | `ContextMenuAction::SelectResidue` など |
@@ -148,6 +153,12 @@ pub fn register_menu_commands(reg: &mut CommandRegistry) {
         Ok(Message::MenuAction(MenuAction::ViewSetBackgroundColor(
             a.color,
         )))
+    });
+    reg.register("view.open_plot", |args| {
+        let a: PlotArgs = parse_args(args)?;
+        let kind = crate::pane_view::PlotKind::parse(&a.kind)
+            .ok_or_else(|| format!("unknown plot '{}'", a.kind))?;
+        Ok(Message::MenuAction(MenuAction::ViewOpenPlot(kind)))
     });
     reg.register("view.set_theme", |args| {
         let a: ThemeArgs = parse_args(args)?;
@@ -686,7 +697,17 @@ fn register_view_menu(menus: &mut MenuRegistry) {
                 "view.toggle_camera_link",
                 ctx.camera_link,
             ),
+            MenuItem::Separator,
         ]
+        .into_iter()
+        .chain(crate::pane_view::PlotKind::ALL.map(|kind| {
+            MenuItem::Command(CommandItem::new(
+                kind.label(),
+                CommandInvocation::new("view.open_plot", json!({ "kind": kind.as_str() })),
+                ItemStyle::DROPDOWN,
+            ))
+        }))
+        .collect()
     });
 }
 
@@ -1197,6 +1218,8 @@ mod tests {
                 "✓ Bottom Panels (Terminal / Logs)",
                 "✓ Split Editor Right",
                 "  Link Viewport Cameras",
+                "---",
+                "Plot: Atom Positions",
             ]
         );
     }
@@ -1371,6 +1394,7 @@ mod tests {
             ),
             ("Split Editor Right", m("ViewToggleEditorSplit")),
             ("Link Viewport Cameras", m("ViewToggleCameraLink")),
+            ("Plot: Atom Positions", m("ViewOpenPlot(AtomPositions)")),
             ("Mouse & Keyboard...", m("HelpControls")),
             ("About YUI...", m("HelpAbout")),
         ]);

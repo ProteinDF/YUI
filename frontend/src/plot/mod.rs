@@ -6,6 +6,7 @@
 //! 点が何を指すかは、プロットごとのアダプタ（`PlotAdapter`）だけが知っている。部品は `PlotKey` を解釈せず、
 //! クリックされた点の鍵を `PlotClick` で返す。選択の変え方は 3D Viewport と同じ（`selection::apply`）。
 
+pub mod sample;
 pub mod scale;
 
 use std::collections::BTreeSet;
@@ -114,15 +115,15 @@ fn mapping_for(data: &PlotData, bounds: Size) -> Option<Mapping> {
 }
 
 pub struct PlotProgram<'a, M> {
-    pub data: &'a PlotData,
-    pub highlighted: &'a BTreeSet<PlotKey>,
+    pub data: PlotData,
+    pub highlighted: BTreeSet<PlotKey>,
     pub on_click: Box<dyn Fn(PlotClick) -> M + 'a>,
 }
 
 /// 散布図の部品。親の大きさいっぱいに広がる。
 pub fn view<'a, M: 'a>(
-    data: &'a PlotData,
-    highlighted: &'a BTreeSet<PlotKey>,
+    data: PlotData,
+    highlighted: BTreeSet<PlotKey>,
     on_click: impl Fn(PlotClick) -> M + 'a,
 ) -> Element<'a, M> {
     Canvas::new(PlotProgram {
@@ -157,13 +158,13 @@ impl<M> canvas::Program<M> for PlotProgram<'_, M> {
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let at = cursor.position_in(bounds)?;
-                let mapping = mapping_for(self.data, bounds.size())?;
+                let mapping = mapping_for(&self.data, bounds.size())?;
                 // 軸の外（目盛りの文字のところなど）は、点を選ぶ場所ではない
                 if !mapping.rect.contains(at) {
                     return None;
                 }
                 let click = PlotClick {
-                    key: hit_test(self.data, mapping, at),
+                    key: hit_test(&self.data, mapping, at),
                     shift: state.modifiers.shift(),
                     command: state.modifiers.command(),
                 };
@@ -184,11 +185,17 @@ impl<M> canvas::Program<M> for PlotProgram<'_, M> {
         let palette = palette();
         let mut frame = Frame::new(renderer, bounds.size());
         frame.fill_rectangle(Point::ORIGIN, bounds.size(), palette.panel_bg);
-        let Some(mapping) = mapping_for(self.data, bounds.size()) else {
+        let Some(mapping) = mapping_for(&self.data, bounds.size()) else {
             return vec![frame.into_geometry()];
         };
-        draw_axes(&mut frame, &palette, self.data, &mapping);
-        draw_points(&mut frame, &palette, self.data, self.highlighted, &mapping);
+        draw_axes(&mut frame, &palette, &self.data, &mapping);
+        draw_points(
+            &mut frame,
+            &palette,
+            &self.data,
+            &self.highlighted,
+            &mapping,
+        );
         vec![frame.into_geometry()]
     }
 }
@@ -484,7 +491,7 @@ mod tests {
         let highlighted = BTreeSet::new();
         let _gpu = crate::test_gpu::lock();
         let element: Element<'_, PlotClick> =
-            iced::widget::container(view(&data, &highlighted, |c| c))
+            iced::widget::container(view(data, highlighted, |c| c))
                 .width(480)
                 .height(320)
                 .into();
@@ -506,7 +513,7 @@ mod tests {
         let highlighted: BTreeSet<PlotKey> = [3, 4, 5, 110].map(PlotKey).into();
         crate::ui_style::set_theme(kind);
         let element: Element<'_, PlotClick> =
-            iced::widget::container(view(&data, &highlighted, |c| c))
+            iced::widget::container(view(data, highlighted, |c| c))
                 .width(480)
                 .height(320)
                 .into();
