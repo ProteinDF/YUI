@@ -6,6 +6,7 @@
 //! 点が何を指すかは、プロットごとのアダプタ（`PlotAdapter`）だけが知っている。部品は `PlotKey` を解釈せず、
 //! クリックされた点の鍵を `PlotClick` で返す。選択の変え方は 3D Viewport と同じ（`selection::apply`）。
 
+pub mod pytools;
 pub mod ramachandran;
 pub mod sample;
 pub mod scale;

@@ -2,7 +2,7 @@
 
 use super::Yui;
 use crate::pane_view::PlotKind;
-use crate::plot::{PlotAdapter, ramachandran, sample};
+use crate::plot::{PlotAdapter, pytools, ramachandran, sample};
 use crate::selection::{self, ViewportClick};
 use crate::status_bar::StatusMessage;
 use iced::widget::{column, container, text};
@@ -18,14 +18,16 @@ pub(crate) struct RamachandranCache {
 
 impl Yui {
     /// プロットの種類ごとの、点と原子の対応
-    fn plot_adapter(&self, kind: PlotKind) -> Box<dyn PlotAdapter> {
+    pub(super) fn plot_adapter(&self, kind: PlotKind) -> Box<dyn PlotAdapter> {
         match kind {
             PlotKind::AtomPositions => Box::new(sample::AtomAdapter),
             PlotKind::Ramachandran => Box::new(ramachandran::RamachandranAdapter::new(
                 self.ramachandran_points(),
             )),
-            // 点と原子の連動は次の段階。それまでは、クリックしても何も選ばない
-            PlotKind::Pytools => Box::new(sample::NoAtoms),
+            PlotKind::Pytools => match self.pytools_atom_map() {
+                Some(map) => Box::new(pytools::PytoolsAdapter::new(map)),
+                None => Box::new(sample::NoAtoms),
+            },
         }
     }
 
@@ -116,7 +118,7 @@ impl Yui {
 
     /// 散布図のクリックで、選択を変える（3D の選択と同じ状態。修飾キーの扱いも同じ）。
     pub(super) fn handle_plot_clicked(&mut self, kind: PlotKind, click: &crate::plot::PlotClick) {
-        if kind == PlotKind::Pytools {
+        if kind == PlotKind::Pytools && !self.pytools_plot_is_linked() {
             return;
         }
         let adapter = self.plot_adapter(kind);

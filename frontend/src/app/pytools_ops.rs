@@ -1,7 +1,8 @@
 //! pytools のグラフ（`pdf-plot/1` の JSON）を開いて、下のパネルのタブに出す（ROADMAP 6l-ii）。
 //!
 //! JSON は `core` で `PlotData` にする。原子の対応（`AtomMap`）は、表示中の構造の原子の数と元素が合うときだけ作る。
-//! 合わなければ、理由をプロットの下に出す。点のクリックと選択の連動は、対応が作れたときの次の段階で足す。
+//! 合わなければ、理由をプロットの下に出す。対応が作れたときだけ、点のクリックで原子を選び、
+//! 3D で選んだ原子を点の強調にする（選択は 3D と共通の `Yui.selection`）。
 
 use super::{Message, Yui};
 use crate::pane_view::{self, PlotKind};
@@ -98,6 +99,17 @@ impl Yui {
         Some(map)
     }
 
+    /// 開いているグラフが、表示中の構造に結びついているか。結びついていなければ、理由をステータスバーに出す。
+    pub(super) fn pytools_plot_is_linked(&mut self) -> bool {
+        let reason = match self.pytools_atom_map().as_deref() {
+            Some(Ok(_)) => return true,
+            Some(Err(e)) => format!("Not linked to the structure: {e}"),
+            None => "Open a structure that matches the plot to select atoms".to_string(),
+        };
+        self.status_message = Some(StatusMessage::warning(reason));
+        false
+    }
+
     /// pytools のグラフのタブの中身。開いていなければ、開き方を案内する。
     pub(super) fn pytools_plot_view(&self) -> iced::Element<'_, Message> {
         let subtle = crate::ui_style::palette().text_subtle;
@@ -124,7 +136,10 @@ impl Yui {
             "{title}: {} points. {link_note}",
             state.plot.plot.point_count()
         );
-        let chart = crate::plot::view(state.plot.plot.clone(), Default::default(), |click| {
+        let highlighted = self
+            .plot_adapter(PlotKind::Pytools)
+            .keys_for(&self.selection);
+        let chart = crate::plot::view(state.plot.plot.clone(), highlighted, |click| {
             Message::PlotClicked(PlotKind::Pytools, click)
         });
         column![
@@ -264,21 +279,98 @@ mod tests {
         assert!(app.pytools_atom_map().is_none());
     }
 
+    fn click(key: Option<u64>, shift: bool, command: bool) -> Message {
+        Message::PlotClicked(
+            PlotKind::Pytools,
+            PlotClick {
+                key: key.map(yui_core::plot::PlotKey),
+                shift,
+                command,
+            },
+        )
+    }
+
+    /// 点のクリックで原子が選ばれ（3D と同じ選択）、3D で選んだ原子は点の強調になる
     #[test]
-    fn clicking_the_plot_does_not_change_the_selection_yet() {
+    fn clicks_select_atoms_and_the_selection_highlights_the_points() {
+        use yui_core::plot::PlotKey;
+
         let mut app = app_with_structure();
         let json = plot_json(&elements_of(&app));
         open(&mut app, json);
+        let id = |index: u32| {
+            app.pytools_atom_map()
+                .unwrap()
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .yui_id(index)
+                .unwrap()
+        };
+        let (first, fifth, tenth) = (id(1), id(5), id(10));
+
+        // 点の番号は、構造の原子の順（ProteinDF の番号 = 構造の i 番目の原子）
+        let _ = app.update(click(Some(5), false, false));
+        assert_eq!(
+            app.selection.iter().copied().collect::<Vec<_>>(),
+            vec![fifth]
+        );
+        let _ = app.update(click(Some(1), true, false));
+        assert_eq!(app.selection, [first, fifth].into());
+        let _ = app.update(click(Some(10), true, false));
+        let _ = app.update(click(Some(5), false, true));
+        assert_eq!(app.selection, [first, tenth].into());
+        // 何もないところのクリックは、選択を外す
+        let _ = app.update(click(None, false, false));
+        assert!(app.selection.is_empty());
+
+        // 3D の選択が、点の強調になる
+        app.selection = [first, tenth, 999_999].into();
+        let keys = app.plot_adapter(PlotKind::Pytools).keys_for(&app.selection);
+        assert_eq!(keys, [PlotKey(1), PlotKey(10)].into());
+    }
+
+    /// 構造と合わないグラフでは、クリックしても何も選ばず、理由を出す（誤った原子を選ばない）
+    #[test]
+    fn a_plot_that_does_not_match_never_selects_atoms() {
+        let mut app = app_with_structure();
+        let elements = elements_of(&app);
+        // 数は同じで、1 つだけ元素が違う
+        let mut other = elements.clone();
+        other[1] = if other[1] == "C" {
+            "N".into()
+        } else {
+            "C".into()
+        };
+        open(&mut app, plot_json(&other));
         app.selection.insert(3);
-        let _ = app.update(Message::PlotClicked(
-            PlotKind::Pytools,
-            PlotClick {
-                key: None,
-                shift: false,
-                command: false,
-            },
-        ));
+        let _ = app.update(click(Some(2), false, false));
         assert_eq!(app.selection.iter().copied().collect::<Vec<_>>(), vec![3]);
+        let status = app.status_message.as_ref().unwrap().text.clone();
+        assert!(status.contains("Not linked"), "{status}");
+        assert!(status.contains("#2"), "{status}");
+        // 何もないところのクリックでも、選択は外れない
+        let _ = app.update(click(None, false, false));
+        assert_eq!(app.selection.len(), 1);
+        // 強調もしない
+        assert!(
+            app.plot_adapter(PlotKind::Pytools)
+                .keys_for(&app.selection)
+                .is_empty()
+        );
+    }
+
+    /// 構造を閉じると、クリックしても選ばず、構造を開くよう案内する
+    #[test]
+    fn without_a_structure_clicks_select_nothing() {
+        let mut app = app_with_structure();
+        let json = plot_json(&elements_of(&app));
+        open(&mut app, json);
+        let _ = app.update(Message::MenuAction(crate::menu_bar::MenuAction::FileNew));
+        let _ = app.update(click(Some(1), false, false));
+        assert!(app.selection.is_empty());
+        let status = app.status_message.as_ref().unwrap().text.clone();
+        assert!(status.contains("Open a structure"), "{status}");
     }
 
     /// 開いたグラフ（連動できる場合、できない場合、何も開いていない場合）を両方のテーマで描く
