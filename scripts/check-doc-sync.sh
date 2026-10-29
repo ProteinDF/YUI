@@ -10,7 +10,7 @@ count_headings() {
 }
 
 status=0
-for en in README.md architecture.md ROADMAP.md TESTING.md CHANGELOG.md CONTRIBUTING.md docs/plugins/plugin-authoring.md; do
+for en in README.md architecture.md ROADMAP.md TESTING.md CHANGELOG.md CONTRIBUTING.md docs/plugins/plugin-authoring.md docs/plugins/plugin-protocol.md; do
     ja="${en%.md}.ja.md"
     if [[ ! -f "$en" || ! -f "$ja" ]]; then
         echo "MISSING  $en / $ja"

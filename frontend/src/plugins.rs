@@ -878,6 +878,63 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// 手引きの例（`examples/protocol/raw-python`）は、プロトコルを直接話す。`msgpack` のパッケージがあれば動かす。
+    #[test]
+    fn the_raw_protocol_example_loads_and_answers() {
+        let Some(python) = python_or_skip() else {
+            return;
+        };
+        let has_msgpack = std::process::Command::new(&python)
+            .args(["-c", "import msgpack"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if !has_msgpack {
+            eprintln!("plugins: skipped (the msgpack package is not installed)");
+            return;
+        }
+        let dir = scratch("raw");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/protocol/raw-python");
+        let target = dir.join("raw-python");
+        fs::create_dir_all(&target).unwrap();
+        for file in ["plugin.yaml", "plugin.py"] {
+            fs::copy(source.join(file), target.join(file))
+                .expect("the example is in the repository");
+        }
+        // 例は `python3` と書いてある。ここでは、見つかった Python に替える
+        let manifest = fs::read_to_string(target.join("plugin.yaml")).unwrap();
+        fs::write(
+            target.join("plugin.yaml"),
+            manifest.replace("[python3,", &format!("[\"{python}\",")),
+        )
+        .unwrap();
+
+        let warnings = load_all(&dir, &["raw-python".to_string()], None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let reply = invoke(
+            "raw-python",
+            "plugin.raw-python.echo",
+            &serde_json::json!({"target": {"kind": "atom", "atom_id": 5}, "args": {"greeting": "hi"}}),
+        )
+        .expect("running");
+        let outcome = reply
+            .recv_timeout(Duration::from_secs(10))
+            .expect("replies");
+        assert_eq!(
+            outcome,
+            Ok(Some(rmpv::Value::Map(vec![(
+                rmpv::Value::from("greeting"),
+                rmpv::Value::from("hi")
+            )])))
+        );
+        let log = log_text(&dir);
+        assert!(
+            log.contains("raw-python: echo {'greeting': 'hi'} for {'atom_id': 5, 'kind': 'atom'}"),
+            "{log}"
+        );
+        stop_plugin("raw-python");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// `command` のあるプラグインは、そのまま実行する（Python でなくてよい）。
     #[test]
     fn a_plugin_with_its_own_command_runs_as_it_is() {
