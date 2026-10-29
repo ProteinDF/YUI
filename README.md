@@ -208,7 +208,7 @@ The packages contain `yui-frontend` (the app, "YUI" in the menus) and the option
 
 ### Overriding `proteindf-bridge` with a local checkout
 
-By default, this repository fetches `proteindf-bridge` via Git release tag (`tag = "2026.10.7"`) from GitHub. If you are developing `proteindf-bridge` concurrently on your local machine, you can override the dependency using Cargo's `[patch]` feature.
+By default, this repository fetches `proteindf-bridge` via Git release tag (`tag = "2026.10.20"`) from GitHub. If you are developing `proteindf-bridge` concurrently on your local machine, you can override the dependency using Cargo's `[patch]` feature.
 
 Add the following configuration to your user-wide Cargo config (e.g., `~/.cargo/config.toml`), or pass it via `--config`:
 

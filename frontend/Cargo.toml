@@ -47,7 +47,7 @@ iced_test = "0.14"
 # WGSL シェーダーを GPU なしで構文・型の検査にかける（viewport/pipeline.rs のテスト）
 naga = { version = "27", features = ["wgsl-in"] }
 # proteindf-bridge release tag containing §3.14 (AtomGroup::setup()) and mmCIF export.
-proteindf-bridge = { git = "https://github.com/ProteinDF/ProteinDF_bridge.git", tag = "2026.10.7" }
+proteindf-bridge = { git = "https://github.com/ProteinDF/ProteinDF_bridge.git", tag = "2026.10.20" }
 
 # インストーラー（cargo-packager）の設定。`scripts/build-installers.sh` と、手動実行のワークフロー
 # `.github/workflows/release-installers.yml` が使う。バージョンはワークスペースのものを使う。

@@ -3305,7 +3305,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 [[package]]
 name = "proteindf-bridge"
 version = "0.1.0"
-source = "git+https://github.com/ProteinDF/ProteinDF_bridge.git?tag=2026.10.7#7eca09be321e3a07664a8948b8dab66ace0a5fa6"
+source = "git+https://github.com/ProteinDF/ProteinDF_bridge.git?tag=2026.10.20#c483ed2247b4370ead4bb22e4abdd11f93e6c8e8"
 dependencies = [
  "indexmap",
  "log",
@@ -4414,7 +4414,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
