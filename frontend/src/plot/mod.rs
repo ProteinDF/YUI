@@ -7,6 +7,9 @@
 //! クリックされた点の鍵を `PlotClick` で返す。選択の変え方は 3D Viewport と同じ（`selection::apply`）。
 
 pub mod sample;
+// 段階 3（タブとメニュー）でつなぐまで、使われない
+#[allow(dead_code)]
+pub mod ramachandran;
 pub mod scale;
 
 use std::collections::BTreeSet;

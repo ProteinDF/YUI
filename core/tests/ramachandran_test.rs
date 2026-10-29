@@ -51,3 +51,22 @@ fn real_structure_gives_plausible_angles_and_valid_atom_ids() {
     }
     assert_eq!(root.atom_count(), flat.len());
 }
+
+#[test]
+fn real_structure_plot_has_unique_keys_and_counts_every_residue() {
+    use yui_core::ramachandran::ramachandran_plot;
+
+    let points = ramachandran_points(&load_1hls(), None);
+    let plot = ramachandran_plot(&points);
+    assert_eq!(plot.data.point_count() + plot.unplotted, points.len());
+    assert!(plot.unplotted >= 2, "the ends of the chains have no angle");
+    assert_eq!(plot.data.skipped_count(), 0);
+
+    let keys: std::collections::HashSet<_> = plot
+        .data
+        .series
+        .iter()
+        .flat_map(|s| s.points.iter().map(|p| p.key))
+        .collect();
+    assert_eq!(keys.len(), plot.data.point_count(), "keys are unique");
+}
