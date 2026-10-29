@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use crate::atom_group::{iter_chains, iter_flat_atoms, iter_models, parse_residue_key};
+use crate::plot::{Axis, PlotData, PlotKey, Point, Series};
 use proteindf_bridge::{AtomGroup, calc_phi_psi};
 
 /// One residue with its backbone dihedral angles, in degrees.
@@ -66,6 +67,58 @@ pub fn ramachandran_points(root: &AtomGroup, model_key: Option<&str>) -> Vec<Ram
         }
     }
     points
+}
+
+/// Key of the point of a residue in the plot: the id of its first atom (unique among residues,
+/// and the same on every redraw). A residue without atoms has no key and is not plotted.
+pub fn plot_key(point: &RamachandranPoint) -> Option<PlotKey> {
+    point.atom_ids.first().map(|id| PlotKey(u64::from(*id)))
+}
+
+/// A Ramachandran plot and the number of residues that could not be plotted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RamachandranPlot {
+    pub data: PlotData,
+    /// Residues with a missing φ or ψ (segment ends, chain breaks) or without atoms.
+    pub unplotted: usize,
+}
+
+/// Series names, in the order they are drawn.
+pub const SERIES_GLY: &str = "Gly";
+pub const SERIES_PRO: &str = "Pro";
+pub const SERIES_OTHER: &str = "Other";
+
+/// The plot: φ on x and ψ on y, both fixed to -180°..180°, one series each for Gly, Pro and the
+/// other residues. A residue becomes a point only when it has both angles.
+pub fn ramachandran_plot(points: &[RamachandranPoint]) -> RamachandranPlot {
+    let mut gly = Vec::new();
+    let mut pro = Vec::new();
+    let mut other = Vec::new();
+    let mut unplotted = 0;
+    for p in points {
+        let (Some(phi), Some(psi), Some(key)) = (p.phi, p.psi, plot_key(p)) else {
+            unplotted += 1;
+            continue;
+        };
+        let point = Point {
+            x: phi,
+            y: psi,
+            key,
+        };
+        match p.residue_name.trim().to_ascii_uppercase().as_str() {
+            "GLY" => gly.push(point),
+            "PRO" => pro.push(point),
+            _ => other.push(point),
+        }
+    }
+    let mut data = PlotData::new(
+        Axis::new("φ (deg)").with_range(-180.0, 180.0),
+        Axis::new("ψ (deg)").with_range(-180.0, 180.0),
+    );
+    data.series.push(Series::new(SERIES_OTHER, other));
+    data.series.push(Series::new(SERIES_GLY, gly));
+    data.series.push(Series::new(SERIES_PRO, pro));
+    RamachandranPlot { data, unplotted }
 }
 
 #[cfg(test)]
@@ -295,5 +348,62 @@ mod tests {
     #[test]
     fn an_empty_structure_gives_no_points() {
         assert!(ramachandran_points(&AtomGroup::new(), None).is_empty());
+    }
+
+    fn point(
+        key: &str,
+        name: &str,
+        phi: Option<f64>,
+        psi: Option<f64>,
+        ids: &[u32],
+    ) -> RamachandranPoint {
+        RamachandranPoint {
+            model_key: "model_1".into(),
+            chain_id: "A".into(),
+            residue_key: key.into(),
+            residue_index: key.parse().unwrap_or(0),
+            residue_name: name.into(),
+            phi,
+            psi,
+            atom_ids: ids.to_vec(),
+        }
+    }
+
+    #[test]
+    fn the_plot_has_fixed_angle_axes_and_three_series() {
+        let plot = ramachandran_plot(&[]);
+        assert_eq!(plot.data.x_range(), (-180.0, 180.0));
+        assert_eq!(plot.data.y_range(), (-180.0, 180.0));
+        let names: Vec<&str> = plot.data.series.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, [SERIES_OTHER, SERIES_GLY, SERIES_PRO]);
+        assert_eq!(plot.unplotted, 0);
+    }
+
+    #[test]
+    fn residues_are_split_by_kind_and_keyed_by_the_first_atom() {
+        let plot = ramachandran_plot(&[
+            point("1", "ALA", Some(-60.0), Some(-45.0), &[1, 2, 3]),
+            point("2", "GLY", Some(80.0), Some(10.0), &[4, 5, 6]),
+            point("3", "pro", Some(-65.0), Some(150.0), &[7, 8, 9]),
+            point("4", "TRP", Some(-120.0), Some(130.0), &[10, 11]),
+        ]);
+        let series = |n: &str| plot.data.series.iter().find(|s| s.name == n).expect(n);
+        assert_eq!(series(SERIES_OTHER).points.len(), 2);
+        let gly = series(SERIES_GLY).points[0];
+        assert_eq!((gly.x, gly.y, gly.key), (80.0, 10.0, PlotKey(4)));
+        assert_eq!(series(SERIES_PRO).points[0].key, PlotKey(7));
+        assert_eq!(plot.unplotted, 0);
+    }
+
+    #[test]
+    fn residues_without_both_angles_or_atoms_are_counted_not_plotted() {
+        let plot = ramachandran_plot(&[
+            point("1", "ALA", None, Some(10.0), &[1]),
+            point("2", "ALA", Some(10.0), None, &[2]),
+            point("3", "ALA", Some(10.0), Some(10.0), &[]),
+            point("4", "ALA", Some(10.0), Some(10.0), &[4]),
+        ]);
+        assert_eq!(plot.data.point_count(), 1);
+        assert_eq!(plot.unplotted, 3);
     }
 }
