@@ -14,7 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::plugin_process::child::{ChildPlugin, CommandOutcome, EventError};
-use crate::plugin_process::protocol::Message;
+use crate::plugin_process::oneshot::{self, OneshotPlugin};
+use crate::plugin_process::protocol::{self, Message};
 use crate::plugin_process::{convert, python};
 
 /// このアプリが対応するプラグイン API の版（架空の版ではなく、`plugin.yaml` の `api_version` と比べる）
@@ -28,6 +29,8 @@ const STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// 動いているプラグインの子プロセス（名前 → 子プロセス）
 static RUNNING: Mutex<BTreeMap<String, Arc<ChildPlugin>>> = Mutex::new(BTreeMap::new());
+/// 呼ぶたびにプロセスを起動するプラグイン（名前 → 呼び出し方）
+static ONESHOT: Mutex<BTreeMap<String, Arc<OneshotPlugin>>> = Mutex::new(BTreeMap::new());
 
 /// プラグインの動かし方（architecture.md §6.4）。`plugin.yaml` の `mode`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -52,6 +55,20 @@ pub struct Manifest {
     pub mode: PluginMode,
     /// 起動するコマンド（プログラムと引数。シェルは通さない）。省くと空（Python のパッケージとして、ランナーで動かす）
     pub command: Vec<String>,
+    /// `oneshot` のプラグインのメニュー項目（`register` がないので、`plugin.yaml` に書く）
+    pub menu_items: Vec<DeclaredItem>,
+    /// `oneshot` のプラグインの、メニューに出さないコマンドの識別子
+    pub commands: Vec<String>,
+}
+
+/// `plugin.yaml` の `menu_items` の 1 項目（`register` の `add_menu_item` と同じ項目）
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredItem {
+    pub location: String,
+    pub order: i64,
+    pub label: String,
+    pub command: String,
+    pub args: serde_json::Value,
 }
 
 /// プラグインを置くフォルダー（`<config>/yui/plugins`）
@@ -118,6 +135,30 @@ pub fn parse_manifest(text: &str, folder: &str) -> Result<Manifest, String> {
         }
         Some(_) => return Err(command_error()),
     };
+    let commands = match map.get("commands") {
+        None => Vec::new(),
+        Some(serde_yaml::Value::Sequence(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| "plugin.yaml 'commands' must be a list of command ids".to_string())?,
+        Some(_) => return Err("plugin.yaml 'commands' must be a list of command ids".into()),
+    };
+    let menu_items = match map.get("menu_items") {
+        None => Vec::new(),
+        Some(serde_yaml::Value::Sequence(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| declared_item(i, item))
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err("plugin.yaml 'menu_items' must be a list".into()),
+    };
+    if mode == PluginMode::Resident && (!commands.is_empty() || !menu_items.is_empty()) {
+        return Err(
+            "plugin.yaml 'menu_items' and 'commands' are only for mode: oneshot (a resident plugin declares them in register)"
+                .into(),
+        );
+    }
     Ok(Manifest {
         name,
         version,
@@ -126,6 +167,32 @@ pub fn parse_manifest(text: &str, folder: &str) -> Result<Manifest, String> {
         author: string("author").unwrap_or_default(),
         mode,
         command,
+        menu_items,
+        commands,
+    })
+}
+
+/// `menu_items` の 1 項目を読む（`location`、`order`、`label`、`command` が要り、`args` は省ける）
+fn declared_item(index: usize, item: &serde_yaml::Value) -> Result<DeclaredItem, String> {
+    let at = |what: &str| format!("plugin.yaml menu_items[{index}] needs {what}");
+    let map = item
+        .as_mapping()
+        .ok_or_else(|| format!("plugin.yaml menu_items[{index}] must be a mapping"))?;
+    let string = |key: &str| map.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    let args = match map.get("args") {
+        None | Some(serde_yaml::Value::Null) => serde_json::json!({}),
+        Some(value) => serde_json::to_value(value)
+            .map_err(|e| format!("plugin.yaml menu_items[{index}] 'args' cannot be used ({e})"))?,
+    };
+    Ok(DeclaredItem {
+        location: string("location").ok_or_else(|| at("a 'location'"))?,
+        order: map
+            .get("order")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| at("an integer 'order'"))?,
+        label: string("label").ok_or_else(|| at("a 'label'"))?,
+        command: string("command").ok_or_else(|| at("a 'command'"))?,
+        args,
     })
 }
 
@@ -208,7 +275,7 @@ fn load_one(
         .map_err(|e| format!("cannot read plugin.yaml ({e})"))?;
     let manifest = parse_manifest(&text, name)?;
     if manifest.mode == PluginMode::Oneshot {
-        return Err("mode 'oneshot' is not supported yet".into());
+        return load_oneshot(&folder, &manifest, python, log);
     }
 
     // `command` があればそのまま実行する。なければ Python のパッケージとして、ランナーで動かす。
@@ -235,6 +302,73 @@ fn load_one(
         running.insert(manifest.name.clone(), Arc::new(plugin));
     }
     Ok((manifest.version, contribution))
+}
+
+/// `oneshot` のプラグインを読む。プロセスは起動しない（呼ぶたびに起動する）。メニュー項目は `plugin.yaml` から。
+fn load_oneshot(
+    folder: &Path,
+    manifest: &Manifest,
+    python: Option<&str>,
+    log: &Path,
+) -> Result<(String, crate::plugin_menu::Contribution), String> {
+    let template = if manifest.command.is_empty() {
+        if !folder.join("__init__.py").is_file() {
+            return Err("the plugin has no 'command' and no __init__.py".into());
+        }
+        let python = python.unwrap_or(python::default_python());
+        python::oneshot_command_for(python, folder, &manifest.name, &manifest.version)
+    } else if oneshot::has_placeholders(&manifest.command) {
+        manifest.command.clone()
+    } else {
+        return Err(format!(
+            "a oneshot 'command' must contain {} and {}",
+            oneshot::INPUT_PLACEHOLDER,
+            oneshot::OUTPUT_PLACEHOLDER
+        ));
+    };
+
+    // コマンドは、メニュー項目のコマンドと `commands` を合わせたもの（重ねない）
+    let mut commands: Vec<String> = Vec::new();
+    for id in manifest
+        .menu_items
+        .iter()
+        .map(|item| &item.command)
+        .chain(&manifest.commands)
+    {
+        if !commands.contains(id) {
+            commands.push(id.clone());
+        }
+    }
+    if commands.is_empty() {
+        return Err("a oneshot plugin declares no command (use menu_items or commands)".into());
+    }
+    let items = manifest
+        .menu_items
+        .iter()
+        .map(|item| protocol::MenuItem {
+            location: item.location.clone(),
+            order: item.order,
+            label: item.label.clone(),
+            command: item.command.clone(),
+            args: convert::from_json(&item.args),
+        })
+        .collect();
+    let contribution =
+        crate::plugin_menu::contribution_from_register(&manifest.name, commands, items)?;
+    if let Ok(mut oneshots) = ONESHOT.lock() {
+        oneshots.insert(
+            manifest.name.clone(),
+            Arc::new(OneshotPlugin::new(&manifest.name, folder, template, log)),
+        );
+    }
+    Ok((manifest.version.clone(), contribution))
+}
+
+/// 起動のときに読んだ、`oneshot` のプラグインか（失敗しても外さない。呼び出しごとの失敗として扱う）
+pub fn is_oneshot(name: &str) -> bool {
+    ONESHOT
+        .lock()
+        .is_ok_and(|oneshots| oneshots.contains_key(name))
 }
 
 /// `hello` と `register` を待ち、検査する。プロセスが先に終わったときは、標準エラーの最後の行を理由にする。
@@ -307,16 +441,26 @@ pub fn invoke(
     id: &str,
     payload: &serde_json::Value,
 ) -> Result<Receiver<CommandOutcome>, String> {
-    let child = RUNNING
-        .lock()
-        .map_err(|_| "the plugin list is unusable".to_string())?
-        .get(plugin)
-        .cloned()
-        .ok_or_else(|| format!("plugin {plugin} is not running"))?;
     let null = serde_json::Value::Null;
     let target = convert::from_json(payload.get("target").unwrap_or(&null));
     let args = convert::from_json(payload.get("args").unwrap_or(&null));
-    Ok(child.invoke(id, target, args))
+    let running = RUNNING
+        .lock()
+        .map_err(|_| "the plugin list is unusable".to_string())?
+        .get(plugin)
+        .cloned();
+    if let Some(child) = running {
+        return Ok(child.invoke(id, target, args));
+    }
+    let oneshot = ONESHOT
+        .lock()
+        .map_err(|_| "the plugin list is unusable".to_string())?
+        .get(plugin)
+        .cloned();
+    match oneshot {
+        Some(plugin) => Ok(plugin.call(id, target, args)),
+        None => Err(format!("plugin {plugin} is not running")),
+    }
 }
 
 /// 動いているプラグインを止める（失敗して外すとき）。止まるのを待たない。
@@ -343,6 +487,7 @@ pub fn stop_all() {
     for handle in handles {
         let _ = handle.join();
     }
+    oneshot::kill_all();
 }
 
 /// ログに 1 行足す。書けなくても、読み込みは続ける。
@@ -434,6 +579,60 @@ mod tests {
             let error = parse_manifest(&format!("{GOOD}{bad}"), "sample").unwrap_err();
             assert!(error.contains("'command'"), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn parses_the_menu_items_and_commands_of_a_oneshot_plugin() {
+        let text = format!(
+            "{GOOD}mode: oneshot\ncommand: [run, \"{{input}}\", \"{{output}}\"]\ncommands: [plugin.sample.extra]\nmenu_items:\n  - {{location: menu/view, order: 500, label: Say, command: plugin.sample.say, args: {{greeting: hi}}}}\n  - {{location: context/viewport, order: 1, label: Show, command: plugin.sample.show}}\n"
+        );
+        let m = parse_manifest(&text, "sample").expect("valid");
+        assert_eq!(m.commands, ["plugin.sample.extra"]);
+        assert_eq!(m.menu_items.len(), 2);
+        assert_eq!(m.menu_items[0].location, "menu/view");
+        assert_eq!(m.menu_items[0].order, 500);
+        assert_eq!(m.menu_items[0].args["greeting"], "hi");
+        // `args` を省くと空の連想配列
+        assert_eq!(m.menu_items[1].args, serde_json::json!({}));
+    }
+
+    #[test]
+    fn rejects_menu_items_that_do_not_fit() {
+        let oneshot = format!("{GOOD}mode: oneshot\n");
+        for (bad, needs) in [
+            ("menu_items: x\n", "must be a list"),
+            ("menu_items:\n  - nope\n", "must be a mapping"),
+            (
+                "menu_items:\n  - {order: 1, label: L, command: c}\n",
+                "'location'",
+            ),
+            (
+                "menu_items:\n  - {location: menu/view, label: L, command: c}\n",
+                "'order'",
+            ),
+            (
+                "menu_items:\n  - {location: menu/view, order: 1, command: c}\n",
+                "'label'",
+            ),
+            (
+                "menu_items:\n  - {location: menu/view, order: 1, label: L}\n",
+                "'command'",
+            ),
+            ("commands: [1]\n", "'commands'"),
+            ("commands: x\n", "'commands'"),
+        ] {
+            let error = parse_manifest(&format!("{oneshot}{bad}"), "sample").unwrap_err();
+            assert!(error.contains(needs), "{bad}: {error}");
+        }
+        // 常駐のプラグインは `register` で宣言するので、書けない
+        let resident = parse_manifest(
+            &format!(
+                "{GOOD}menu_items:\n  - {{location: menu/view, order: 1, label: L, command: c}}\n"
+            ),
+            "sample",
+        )
+        .unwrap_err();
+        assert!(resident.contains("only for mode: oneshot"), "{resident}");
     }
 
     /// テスト用の一時フォルダー（テストごとに別の名前）
@@ -699,8 +898,13 @@ mod tests {
 
         // 名前が、プラグインの自己申告と違う
         make_plugin(&dir, "other", &format!("command: [\"{program}\"]\n"), None);
-        // 都度呼び出しは、まだ対応していない
-        make_plugin(&dir, "later", "mode: oneshot\ncommand: [\"x\"]\n", None);
+        // `oneshot` の `command` に、入力と出力の印がない
+        make_plugin(
+            &dir,
+            "later",
+            "mode: oneshot\ncommand: [\"x\"]\nmenu_items:\n  - {location: menu/view, order: 1, label: L, command: plugin.later.x}\n",
+            None,
+        );
         // `command` も `__init__.py` もない
         make_plugin(&dir, "empty", "", None);
         // 起動できない `command`
@@ -722,7 +926,10 @@ mod tests {
             has("says its name is 'test-plugin', not 'other'"),
             "{warnings:?}"
         );
-        assert!(has("mode 'oneshot' is not supported yet"), "{warnings:?}");
+        assert!(
+            has("a oneshot 'command' must contain {input} and {output}"),
+            "{warnings:?}"
+        );
         assert!(has("no 'command' and no __init__.py"), "{warnings:?}");
         assert!(
             has("cannot start 'yui-no-such-program-xyz'"),
@@ -763,6 +970,165 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("cannot start"), "{warnings:?}");
         assert!(warnings[0].contains("plugins.python"), "{warnings:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `oneshot` のプラグイン: メニュー項目は `plugin.yaml` から。プロセスは呼ぶたびに起動する。
+    #[test]
+    fn a_oneshot_plugin_declares_its_items_in_plugin_yaml_and_runs_once_per_call() {
+        let dir = scratch("oneshot");
+        let program = test_plugin_path();
+        make_plugin(
+            &dir,
+            "oneshot-one",
+            &format!(
+                "mode: oneshot\ncommand: [\"{program}\", oneshot, \"{{input}}\", \"{{output}}\"]\nmenu_items:\n  - {{location: menu/view, order: 500, label: Echo, command: plugin.oneshot-one.echo}}\ncommands: [plugin.oneshot-one.fail]\n"
+            ),
+            None,
+        );
+        let warnings = load_all(&dir, &["oneshot-one".to_string()], None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(is_oneshot("oneshot-one"));
+        assert!(!is_oneshot("never-heard-of"));
+        assert!(
+            log_text(&dir).contains("oneshot-one 0.1.0: loaded"),
+            "{}",
+            log_text(&dir)
+        );
+
+        let wait = |reply: Receiver<CommandOutcome>| {
+            reply
+                .recv_timeout(Duration::from_secs(10))
+                .expect("replies")
+        };
+        let echoed = invoke(
+            "oneshot-one",
+            "plugin.oneshot-one.echo",
+            &serde_json::json!({"target": null, "args": {"n": 3}}),
+        )
+        .expect("a oneshot plugin");
+        assert_eq!(
+            wait(echoed),
+            Ok(Some(rmpv::Value::Map(vec![(
+                rmpv::Value::from("n"),
+                rmpv::Value::from(3)
+            )])))
+        );
+        // `commands` だけに書いたコマンドも呼べる。失敗は、その呼び出しの失敗
+        let failed = invoke(
+            "oneshot-one",
+            "plugin.oneshot-one.fail",
+            &serde_json::json!({}),
+        )
+        .expect("a oneshot plugin");
+        assert_eq!(wait(failed), Err("boom".to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Python のパッケージを `oneshot` で動かす: ランナーが `register(app)` でコマンドを探し、
+    /// 呼ぶたびに 1 回だけ実行する。`add_menu_item` は無視される（項目は `plugin.yaml` から）。
+    #[test]
+    fn a_python_oneshot_plugin_runs_register_and_the_command_for_each_call() {
+        let Some(python) = python_or_skip() else {
+            return;
+        };
+        let dir = scratch("py-oneshot");
+        make_plugin(
+            &dir,
+            "py-once",
+            "mode: oneshot\nmenu_items:\n  - {location: menu/view, order: 500, label: Say, command: plugin.py-once.say}\n",
+            Some(concat!(
+                "def register(app):\n",
+                "    def say(ctx, args):\n",
+                "        app.log('said ' + args['word'] + ' at ' + str(ctx.target['atom_id']))\n",
+                "        return {'echo': args['word']}\n",
+                "    def boom(ctx, args):\n",
+                "        raise ValueError('bad')\n",
+                "    app.add_command('plugin.py-once.say', say)\n",
+                "    app.add_command('plugin.py-once.boom', boom)\n",
+                "    app.add_menu_item('menu/help', 1, 'Ignored', 'plugin.py-once.say')\n",
+            )),
+        );
+        let warnings = load_all(&dir, &["py-once".to_string()], Some(&python));
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let wait = |reply: Receiver<CommandOutcome>| {
+            reply
+                .recv_timeout(Duration::from_secs(20))
+                .expect("replies")
+        };
+        let said = invoke(
+            "py-once",
+            "plugin.py-once.say",
+            &serde_json::json!({"target": {"kind": "atom", "atom_id": 7}, "args": {"word": "hi"}}),
+        )
+        .expect("a oneshot plugin");
+        assert_eq!(
+            wait(said),
+            Ok(Some(rmpv::Value::Map(vec![(
+                rmpv::Value::from("echo"),
+                rmpv::Value::from("hi")
+            )])))
+        );
+        assert!(
+            log_text(&dir).contains("py-once: said hi at 7"),
+            "{}",
+            log_text(&dir)
+        );
+
+        // 宣言していないコマンド（`boom` は `plugin.yaml` にない）も、渡せば実行される。例外は理由つきの失敗
+        let boom = invoke("py-once", "plugin.py-once.boom", &serde_json::json!({}))
+            .expect("a oneshot plugin");
+        assert_eq!(wait(boom), Err("ValueError: bad".to_string()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_oneshot_plugin_that_does_not_fit_the_rules_is_refused_with_a_reason() {
+        let dir = scratch("oneshot-refused");
+        let item =
+            "menu_items:\n  - {location: menu/view, order: 1, label: L, command: plugin.NAME.x}\n";
+        let with_item = |name: &str| item.replace("NAME", name);
+        // `command` も `__init__.py` もない
+        make_plugin(
+            &dir,
+            "no-code",
+            &format!("mode: oneshot\n{}", with_item("no-code")),
+            None,
+        );
+        // コマンドを 1 つも宣言していない
+        make_plugin(
+            &dir,
+            "no-decl",
+            "mode: oneshot\ncommand: [x, \"{input}\", \"{output}\"]\n",
+            None,
+        );
+        // 場所を知らない
+        make_plugin(
+            &dir,
+            "bad-place",
+            "mode: oneshot\ncommand: [x, \"{input}\", \"{output}\"]\nmenu_items:\n  - {location: menu/edit, order: 1, label: L, command: plugin.bad-place.x}\n",
+            None,
+        );
+        // 識別子が名前空間の外
+        make_plugin(
+            &dir,
+            "bad-id",
+            "mode: oneshot\ncommand: [x, \"{input}\", \"{output}\"]\nmenu_items:\n  - {location: menu/view, order: 1, label: L, command: file.new}\n",
+            None,
+        );
+        let enabled: Vec<String> = ["no-code", "no-decl", "bad-place", "bad-id"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let warnings = load_all(&dir, &enabled, None);
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        let has = |needle: &str| warnings.iter().any(|w| w.contains(needle));
+        assert!(has("no 'command' and no __init__.py"), "{warnings:?}");
+        assert!(has("declares no command"), "{warnings:?}");
+        assert!(has("unknown menu location 'menu/edit'"), "{warnings:?}");
+        assert!(has("must start with 'plugin.bad-id.'"), "{warnings:?}");
+        assert!(!is_oneshot("no-code") && !is_oneshot("bad-id"));
         let _ = fs::remove_dir_all(&dir);
     }
 

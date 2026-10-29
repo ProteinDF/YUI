@@ -5,8 +5,11 @@
 //! - `silent`: `hello` だけを送り、`register` は送らない
 //! - `stubborn`: 標準入力が閉じても終わらない（強制終了のテスト用）
 //!
+//! - `oneshot <入力> <出力>`: 入力ファイルのコマンドを 1 回実行し、出力ファイルを書いて終わる
+//!
 //! `invoke` のコマンドは、名前の最後で選ぶ: `echo`（args をそのまま返す）、`fail`（理由 `boom`）、
-//! `log`（ログを 1 行送る）、`exit`（答えずに終わる）。
+//! `log`（ログを 1 行送る。`oneshot` では標準出力と標準エラーに書く）、`exit`（答えずに終わる）、
+//! `hang`（`oneshot` で、終わらない）。
 #![allow(dead_code)]
 
 #[path = "../src/plugin_process/protocol.rs"]
@@ -18,8 +21,57 @@ use std::io::{stdin, stdout};
 use std::thread::sleep;
 use std::time::Duration;
 
+/// `oneshot`: 入力ファイルのコマンドを実行して、出力ファイルを書く
+fn run_oneshot(input: &str, output: &str) {
+    let bytes = std::fs::read(input).expect("read the input file");
+    let value = rmpv::decode::read_value(&mut bytes.as_slice()).expect("msgpack");
+    let get = |key: &str| {
+        value
+            .as_map()
+            .and_then(|map| map.iter().find(|(k, _)| k.as_str() == Some(key)))
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Nil)
+    };
+    let command = get("command").as_str().unwrap_or("").to_string();
+    let (ok, error, result) = match command.rsplit('.').next().unwrap_or("") {
+        "echo" => (true, Value::Nil, get("args")),
+        "fail" => (false, Value::from("boom"), Value::Nil),
+        "log" => {
+            println!("printed to stdout");
+            eprintln!("written to stderr");
+            (true, Value::Nil, Value::Nil)
+        }
+        "exit" => {
+            eprintln!("goodbye from exit");
+            std::process::exit(3);
+        }
+        "hang" => loop {
+            sleep(Duration::from_secs(1));
+        },
+        other => (
+            false,
+            Value::from(format!("unknown command '{other}'")),
+            Value::Nil,
+        ),
+    };
+    let reply = Value::Map(vec![
+        (Value::from("v"), Value::from(protocol::PROTOCOL_VERSION)),
+        (Value::from("ok"), Value::Boolean(ok)),
+        (Value::from("error"), error),
+        (Value::from("result"), result),
+    ]);
+    let mut body = Vec::new();
+    rmpv::encode::write_value(&mut body, &reply).expect("encode");
+    std::fs::write(output, body).expect("write the output file");
+}
+
 fn main() {
-    let mode = std::env::args().nth(1).unwrap_or_default();
+    let args: Vec<String> = std::env::args().collect();
+    let mode = args.get(1).cloned().unwrap_or_default();
+    if mode == "oneshot" {
+        run_oneshot(&args[2], &args[3]);
+        return;
+    }
     let mut out = stdout().lock();
     let mut input = stdin().lock();
 
