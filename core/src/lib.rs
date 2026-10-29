@@ -5,6 +5,7 @@ pub mod export;
 pub mod interaction;
 pub mod packing;
 pub mod plot;
+pub mod pytools_atom_map;
 pub mod pytools_plot;
 pub mod ramachandran;
 pub mod representation;
