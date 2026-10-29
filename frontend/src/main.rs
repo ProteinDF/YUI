@@ -21,10 +21,6 @@ mod playback;
 mod playback_bar;
 mod png_export;
 mod project_tree_pane;
-// UI からはまだ直接呼ばない（プラグインの読み込みが使う）。メニューとコマンドへの配線は 6k-iii
-#[cfg(all(feature = "python", not(target_arch = "wasm32")))]
-#[allow(dead_code)]
-mod python_runtime;
 // プラグインの読み込み（6k-ii）。一覧の表示など、まだ使わない項目があるので dead_code を許す
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
@@ -77,9 +73,11 @@ pub fn main() -> iced::Result {
     #[cfg(not(target_arch = "wasm32"))]
     let loaded = {
         let mut loaded = loaded;
-        loaded
-            .warnings
-            .extend(plugins::start(&loaded.settings.plugins_enabled));
+        let warnings = plugins::start(
+            &loaded.settings.plugins_enabled,
+            loaded.settings.plugins_python.as_deref(),
+        );
+        loaded.warnings.extend(warnings);
         loaded
     };
     fonts::init(&user_settings::font_choice(&loaded.settings));
@@ -88,7 +86,7 @@ pub fn main() -> iced::Result {
     crate::ui_style::set_ui_settings(loaded.settings.ui.clone());
     user_settings::set_startup(loaded);
 
-    iced::application(Yui::new, Yui::update, Yui::view)
+    let result = iced::application(Yui::new, Yui::update, Yui::view)
         // ウィンドウのアイコン（デスクトップ版）。`exit_on_close_request` は、下で設定し直すので、先に置く
         .window(iced::window::Settings {
             icon: app_icon::window_icon(),
@@ -106,5 +104,9 @@ pub fn main() -> iced::Result {
         .theme(Yui::theme)
         .subscription(Yui::subscription)
         .title(Yui::title)
-        .run()
+        .run();
+    // アプリを終えるとき、プラグインのプロセスも止める
+    #[cfg(not(target_arch = "wasm32"))]
+    plugins::stop_all();
+    result
 }

@@ -1,38 +1,36 @@
-//! Python プラグインの読み込み（段階 6k-ii、architecture.md §6.4 と §8.6）。
+//! プラグインの読み込みと実行（段階 6k、architecture.md §6.4 と §8.6）。
 //!
 //! `<config>/yui/plugins/<name>/` の `plugin.yaml` を検査し、`settings.yaml` の `plugins: enabled:` に
-//! 書かれたものだけを読む。失敗は、そのプラグインだけを外して警告にする（アプリは止まらない）。
-//! 読み込みと失敗は `plugin.log` に書く（Log Viewer で開ける）。
+//! 書かれたものだけを、子プロセスとして起動する（`plugin_process`）。`command` のないプラグインは、
+//! Python のパッケージとして、同梱のランナーで動かす。失敗は、そのプラグインだけを外して警告にする
+//! （アプリは止まらない）。読み込みと失敗は `plugin.log` に書く（Log Viewer で開ける）。
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use std::sync::Mutex;
-#[cfg(feature = "python")]
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
-#[cfg(feature = "python")]
-use std::time::Duration;
-
-#[cfg(feature = "python")]
-use crate::python_runtime::PythonRuntime;
+use crate::plugin_process::child::{ChildPlugin, CommandOutcome, EventError};
+use crate::plugin_process::protocol::Message;
+use crate::plugin_process::{convert, python};
 
 /// このアプリが対応するプラグイン API の版（架空の版ではなく、`plugin.yaml` の `api_version` と比べる）
 pub const API_VERSION: u64 = 1;
-/// プラグインのログ（読み込みの結果、`app.log`、失敗）
+/// プラグインのログ（読み込みの結果、`app.log`、標準エラー、失敗）
 pub const LOG_FILE: &str = "plugin.log";
-/// 1 回の読み込み（`register` の呼び出し）を待つ時間。過ぎたら、そのプラグインを失敗にする。
-#[cfg(feature = "python")]
+/// 起動から `register` が届くまでに待つ時間。過ぎたら、そのプラグインを失敗にする。
 const LOAD_WAIT: Duration = Duration::from_secs(5);
+/// プラグインを止めるとき、標準入力を閉じてから、終わるのを待つ時間
+const STOP_GRACE: Duration = Duration::from_millis(500);
 
-/// Python の専用スレッド。読み込みの最初のプラグインで起動し、アプリの終わりまで残す。
-#[cfg(feature = "python")]
-static HOST: Mutex<Option<PythonRuntime>> = Mutex::new(None);
+/// 動いているプラグインの子プロセス（名前 → 子プロセス）
+static RUNNING: Mutex<BTreeMap<String, Arc<ChildPlugin>>> = Mutex::new(BTreeMap::new());
 
 /// プラグインの動かし方（architecture.md §6.4）。`plugin.yaml` の `mode`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)] // 子プロセス版への切り替え（次の段階）で使う
 pub enum PluginMode {
     /// 長く動く 1 つのプロセス。`register` でコマンドとメニュー項目を宣言する
     #[default]
@@ -51,10 +49,8 @@ pub struct Manifest {
     pub description: String,
     pub author: String,
     /// 動かし方（省くと `resident`）
-    #[allow(dead_code)] // 子プロセス版への切り替え（次の段階）で使う
     pub mode: PluginMode,
-    /// 起動するコマンド（プログラムと引数。シェルは通さない）。省くと空（今の埋め込み版の読み込みだけが動く）
-    #[allow(dead_code)] // 子プロセス版への切り替え（次の段階）で使う
+    /// 起動するコマンド（プログラムと引数。シェルは通さない）。省くと空（Python のパッケージとして、ランナーで動かす）
     pub command: Vec<String>,
 }
 
@@ -161,20 +157,20 @@ fn record_startup(name: &str, result: Result<(), String>) {
     }
 }
 
-/// 起動時に呼ぶ。読み込めなかったものの理由（警告）を返す。
-pub fn start(enabled: &[String]) -> Vec<String> {
+/// 起動時に呼ぶ。読み込めなかったものの理由（警告）を返す。`python` は、設定の `plugins.python`。
+pub fn start(enabled: &[String], python: Option<&str>) -> Vec<String> {
     set_configured(enabled);
     if enabled.is_empty() {
         return Vec::new();
     }
     match plugins_dir() {
-        Some(dir) => load_all(&dir, enabled),
+        Some(dir) => load_all(&dir, enabled, python),
         None => vec!["plugins: no configuration folder; no plugin is loaded".into()],
     }
 }
 
 /// `enabled` に並んだプラグインを、`dir` から読む。結果は `plugin.log` にも書く。
-pub fn load_all(dir: &Path, enabled: &[String]) -> Vec<String> {
+pub fn load_all(dir: &Path, enabled: &[String], python: Option<&str>) -> Vec<String> {
     let log = dir.join(LOG_FILE);
     let mut warnings = Vec::new();
     let mut seen = HashSet::new();
@@ -182,7 +178,7 @@ pub fn load_all(dir: &Path, enabled: &[String]) -> Vec<String> {
         if !seen.insert(name.as_str()) {
             continue;
         }
-        match load_one(dir, name, &log) {
+        match load_one(dir, name, python, &log) {
             Ok((version, contribution)) => {
                 append_log(&log, &format!("{name} {version}: loaded"));
                 crate::plugin_menu::record_loaded(contribution);
@@ -201,6 +197,7 @@ pub fn load_all(dir: &Path, enabled: &[String]) -> Vec<String> {
 fn load_one(
     dir: &Path,
     name: &str,
+    python: Option<&str>,
     log: &Path,
 ) -> Result<(String, crate::plugin_menu::Contribution), String> {
     if !valid_name(name) {
@@ -210,11 +207,142 @@ fn load_one(
     let text = fs::read_to_string(folder.join("plugin.yaml"))
         .map_err(|e| format!("cannot read plugin.yaml ({e})"))?;
     let manifest = parse_manifest(&text, name)?;
-    if !folder.join("__init__.py").is_file() {
-        return Err("the package has no __init__.py".into());
+    if manifest.mode == PluginMode::Oneshot {
+        return Err("mode 'oneshot' is not supported yet".into());
     }
-    let contribution = run_register(&folder, &manifest, log)?;
+
+    // `command` があればそのまま実行する。なければ Python のパッケージとして、ランナーで動かす。
+    let uses_runner = manifest.command.is_empty();
+    let argv = if uses_runner {
+        if !folder.join("__init__.py").is_file() {
+            return Err("the plugin has no 'command' and no __init__.py".into());
+        }
+        let python = python.unwrap_or(python::default_python());
+        python::command_for(python, &folder, &manifest.name, &manifest.version)
+    } else {
+        manifest.command.clone()
+    };
+    let plugin = ChildPlugin::spawn(&manifest.name, &argv, &folder, log).map_err(|e| {
+        if uses_runner {
+            format!("{e}; set 'plugins.python' in settings.yaml to the Python to use")
+        } else {
+            e
+        }
+    })?;
+    // 登録に失敗したら、`plugin` はここで捨てられ、プロセスは止まる
+    let contribution = wait_for_registration(&plugin, &manifest)?;
+    if let Ok(mut running) = RUNNING.lock() {
+        running.insert(manifest.name.clone(), Arc::new(plugin));
+    }
     Ok((manifest.version, contribution))
+}
+
+/// `hello` と `register` を待ち、検査する。プロセスが先に終わったときは、標準エラーの最後の行を理由にする。
+fn wait_for_registration(
+    plugin: &ChildPlugin,
+    manifest: &Manifest,
+) -> Result<crate::plugin_menu::Contribution, String> {
+    let deadline = Instant::now() + LOAD_WAIT;
+    let mut said_hello = false;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match plugin.recv_event(left) {
+            Ok(Message::Hello {
+                name, api_version, ..
+            }) => {
+                if name != manifest.name {
+                    return Err(format!(
+                        "the plugin says its name is '{name}', not '{}'",
+                        manifest.name
+                    ));
+                }
+                if api_version != API_VERSION {
+                    return Err(format!(
+                        "api_version {api_version} is not supported (this app supports {API_VERSION})"
+                    ));
+                }
+                said_hello = true;
+            }
+            Ok(Message::Register {
+                commands,
+                menu_items,
+            }) => {
+                if !said_hello {
+                    return Err("the plugin registered before it said hello".into());
+                }
+                return crate::plugin_menu::contribution_from_register(
+                    &manifest.name,
+                    commands,
+                    menu_items,
+                );
+            }
+            Ok(_) => {}
+            Err(EventError::Timeout) => {
+                return Err(format!(
+                    "did not register within {} seconds",
+                    LOAD_WAIT.as_secs()
+                ));
+            }
+            Err(EventError::Closed) => return Err(exit_reason(plugin)),
+        }
+    }
+}
+
+/// 登録の前にプロセスが終わったときの理由。ランナーは、失敗を `register failed: ...` の行で知らせる。
+fn exit_reason(plugin: &ChildPlugin) -> String {
+    let tail = plugin.stderr_tail(Duration::from_millis(500));
+    match tail.last() {
+        Some(line) => match line.strip_prefix("register failed: ") {
+            Some(reason) => reason.to_string(),
+            None => format!("the plugin process ended before it registered ({line})"),
+        },
+        None => "the plugin process ended before it registered".into(),
+    }
+}
+
+/// プラグインのコマンドを、その子プロセスに頼む。返るのは結果の受け口（待つのは呼び出し側）。
+/// `payload` は `{"target": ..., "args": ...}`。
+pub fn invoke(
+    plugin: &str,
+    id: &str,
+    payload: &serde_json::Value,
+) -> Result<Receiver<CommandOutcome>, String> {
+    let child = RUNNING
+        .lock()
+        .map_err(|_| "the plugin list is unusable".to_string())?
+        .get(plugin)
+        .cloned()
+        .ok_or_else(|| format!("plugin {plugin} is not running"))?;
+    let null = serde_json::Value::Null;
+    let target = convert::from_json(payload.get("target").unwrap_or(&null));
+    let args = convert::from_json(payload.get("args").unwrap_or(&null));
+    Ok(child.invoke(id, target, args))
+}
+
+/// 動いているプラグインを止める（失敗して外すとき）。止まるのを待たない。
+pub fn stop_plugin(name: &str) {
+    let plugin = RUNNING
+        .lock()
+        .ok()
+        .and_then(|mut running| running.remove(name));
+    if let Some(plugin) = plugin {
+        std::thread::spawn(move || plugin.shutdown(STOP_GRACE));
+    }
+}
+
+/// アプリを終えるとき、すべてのプラグインを止める（終わるのを待つ）。
+pub fn stop_all() {
+    let plugins: Vec<Arc<ChildPlugin>> = RUNNING
+        .lock()
+        .map(|mut running| std::mem::take(&mut *running).into_values().collect())
+        .unwrap_or_default();
+    let handles: Vec<_> = plugins
+        .into_iter()
+        .map(|plugin| std::thread::spawn(move || plugin.shutdown(STOP_GRACE)))
+        .collect();
+    for handle in handles {
+        let _ = handle.join();
+    }
 }
 
 /// ログに 1 行足す。書けなくても、読み込みは続ける。
@@ -225,147 +353,6 @@ pub(crate) fn append_log(log: &Path, line: &str) {
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log) {
         let _ = writeln!(file, "{line}");
     }
-}
-
-#[cfg(not(feature = "python"))]
-fn run_register(
-    _folder: &Path,
-    _manifest: &Manifest,
-    _log: &Path,
-) -> Result<crate::plugin_menu::Contribution, String> {
-    Err("this build has no Python support (build with --features python)".into())
-}
-
-#[cfg(feature = "python")]
-fn run_register(
-    folder: &Path,
-    manifest: &Manifest,
-    log: &Path,
-) -> Result<crate::plugin_menu::Contribution, String> {
-    let mut host = HOST
-        .lock()
-        .map_err(|_| "the Python host is unusable".to_string())?;
-    if host.is_none() {
-        let runtime = PythonRuntime::start().map_err(|e| format!("{e}; plugins are disabled"))?;
-        *host = Some(runtime);
-    }
-    let runtime = host
-        .as_ref()
-        .ok_or_else(|| "the Python host is unusable".to_string())?;
-    wait(runtime.exec(&load_code(folder, &manifest.name, log)))?;
-    // 登録の関数で起きた例外は、Python 側で `_yui_plugin_error` に入れてある
-    match wait(runtime.eval("_yui_plugin_error"))? {
-        outcome if outcome == "None" => {}
-        outcome => return Err(outcome),
-    }
-    // 成功したら、登録したコマンドと項目の一覧（JSON）を受け取り、検査する
-    let export = wait(runtime.eval("_yui_plugin_export"))?;
-    crate::plugin_menu::contribution_from_export(&manifest.name, &export)
-}
-
-#[cfg(feature = "python")]
-fn wait(reply: Receiver<Result<String, String>>) -> Result<String, String> {
-    match reply.recv_timeout(LOAD_WAIT) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Err(format!(
-            "did not finish within {} seconds",
-            LOAD_WAIT.as_secs()
-        )),
-        Err(RecvTimeoutError::Disconnected) => Err("the Python thread stopped".into()),
-    }
-}
-
-/// プラグインのコマンドを、Python の専用スレッドで呼ぶ。返るのは結果の受け口（待つのは呼び出し側）。
-#[cfg(feature = "python")]
-pub fn send_command(
-    id: &str,
-    payload: &serde_json::Value,
-) -> Result<Receiver<Result<String, String>>, String> {
-    let host = HOST
-        .lock()
-        .map_err(|_| "the Python host is unusable".to_string())?;
-    let runtime = host
-        .as_ref()
-        .ok_or_else(|| "the Python host is not running".to_string())?;
-    Ok(runtime.eval(&format!(
-        "_yui_run_plugin_command({}, {})",
-        py_str(id),
-        py_str(&payload.to_string())
-    )))
-}
-
-#[cfg(not(feature = "python"))]
-pub fn send_command(
-    _id: &str,
-    _payload: &serde_json::Value,
-) -> Result<std::sync::mpsc::Receiver<Result<String, String>>, String> {
-    Err("this build has no Python support (build with --features python)".into())
-}
-
-/// Python の文字列の書き方（JSON の文字列は、Python の文字列としても同じに読める）
-fn py_str(text: &str) -> String {
-    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into())
-}
-
-/// プラグインを読み込む Python のコード。パスと名前は Python の文字列として埋める。
-#[cfg(feature = "python")]
-fn load_code(folder: &Path, name: &str, log: &Path) -> String {
-    let module = name.replace('-', "_");
-    let init = folder.join("__init__.py");
-    let template = r#"
-import importlib.util as _yui_util
-import json as _yui_json
-import sys as _yui_sys
-_yui_plugin_error = None
-_yui_plugin_export = None
-try:
-    _yui_plugin_commands
-except NameError:
-    _yui_plugin_commands = {}
-class _YuiApp:
-    def __init__(self, name, log_path):
-        self._name = name
-        self._log_path = log_path
-        self._commands = {}
-        self._items = []
-    def log(self, message):
-        with open(self._log_path, "a", encoding="utf-8") as _f:
-            _f.write("[" + self._name + "] " + str(message) + "\n")
-    def add_command(self, command_id, func):
-        if not callable(func):
-            raise TypeError("add_command needs a function")
-        self._commands[str(command_id)] = func
-    def add_menu_item(self, location, order, label, command, args=None):
-        self._items.append({"location": str(location), "order": int(order), "label": str(label), "command": str(command), "args": {} if args is None else args})
-class _YuiContext:
-    def __init__(self, target):
-        self.target = target
-def _yui_run_plugin_command(command_id, payload_text):
-    try:
-        payload = _yui_json.loads(payload_text)
-        func = _yui_plugin_commands[command_id]
-        func(_YuiContext(payload.get("target")), payload.get("args", {}))
-        return ""
-    except Exception as _yui_e:
-        return type(_yui_e).__name__ + ": " + str(_yui_e)
-try:
-    _yui_spec = _yui_util.spec_from_file_location("yui_plugin_MODULE", INIT_PATH, submodule_search_locations=[DIR_PATH])
-    _yui_module = _yui_util.module_from_spec(_yui_spec)
-    _yui_sys.modules[_yui_spec.name] = _yui_module
-    _yui_spec.loader.exec_module(_yui_module)
-    _yui_app = _YuiApp(NAME_TEXT, LOG_PATH)
-    _yui_module.register(_yui_app)
-    _yui_plugin_export = _yui_json.dumps({"commands": list(_yui_app._commands), "items": _yui_app._items})
-    _yui_plugin_commands.update(_yui_app._commands)
-except Exception as _yui_e:
-    _yui_plugin_error = type(_yui_e).__name__ + ": " + str(_yui_e)
-"#;
-    template
-        .replace("MODULE", &module)
-        .replace("INIT_PATH", &py_str(&init.to_string_lossy()))
-        .replace("DIR_PATH", &py_str(&folder.to_string_lossy()))
-        .replace("NAME_TEXT", &py_str(name))
-        .replace("LOG_PATH", &py_str(&log.to_string_lossy()))
 }
 
 #[cfg(test)]
@@ -478,7 +465,7 @@ mod tests {
             "bad".to_string(),
             "absent".to_string(),
         ];
-        let warnings = load_all(&dir, &enabled);
+        let warnings = load_all(&dir, &enabled, None);
 
         assert_eq!(
             warnings.len(),
@@ -500,56 +487,87 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Python を実際に動かす。`register` が `app.log` を使い、同じパッケージの別のモジュールを
-    /// 相対 import し、失敗した別のプラグインは警告になる。
-    #[cfg(feature = "python")]
+    use crate::plugin_process::child::test_plugin_path;
+    use crate::plugin_process::python::find_python;
+
+    /// 動く Python。ない環境では `None` で、その Python を使うテストは読み飛ばす
+    fn python_or_skip() -> Option<String> {
+        let python = find_python();
+        if python.is_none() {
+            eprintln!("plugins: skipped (no Python found)");
+        }
+        python
+    }
+
+    /// `dir/<name>/` に、`plugin.yaml`（`GOOD` の名前を替えたもの。`extra` を足す）と `__init__.py` を作る
+    fn make_plugin(dir: &Path, name: &str, extra: &str, init: Option<&str>) -> PathBuf {
+        let folder = dir.join(name);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(
+            folder.join("plugin.yaml"),
+            format!("{}{extra}", GOOD.replace("sample", name)),
+        )
+        .unwrap();
+        if let Some(init) = init {
+            fs::write(folder.join("__init__.py"), init).unwrap();
+        }
+        folder
+    }
+
+    fn log_text(dir: &Path) -> String {
+        fs::read_to_string(dir.join(LOG_FILE)).unwrap_or_default()
+    }
+
+    /// Python のプラグインが、`app.log` を使い、同じパッケージの別のモジュールを相対 import し、
+    /// 失敗した別のプラグインは警告になる。
     #[test]
     fn a_plugin_registers_logs_and_fails_alone() {
+        let Some(python) = python_or_skip() else {
+            return;
+        };
         let dir = scratch("python");
-        let good = dir.join("good-one");
-        fs::create_dir_all(&good).unwrap();
-        fs::write(good.join("plugin.yaml"), GOOD.replace("sample", "good-one")).unwrap();
+        let good = make_plugin(
+            &dir,
+            "good-one",
+            "",
+            Some("from . import helper\n\ndef register(app):\n    app.log(helper.VALUE)\n"),
+        );
         fs::write(good.join("helper.py"), "VALUE = 'from helper'\n").unwrap();
-        fs::write(
-            good.join("__init__.py"),
-            "from . import helper\n\ndef register(app):\n    app.log(helper.VALUE)\n",
-        )
-        .unwrap();
-        let broken = dir.join("broken");
-        fs::create_dir_all(&broken).unwrap();
-        fs::write(broken.join("plugin.yaml"), GOOD.replace("sample", "broken")).unwrap();
-        fs::write(
-            broken.join("__init__.py"),
-            "def register(app):\n    raise RuntimeError('boom')\n",
-        )
-        .unwrap();
+        make_plugin(
+            &dir,
+            "broken",
+            "",
+            Some("def register(app):\n    raise RuntimeError('boom')\n"),
+        );
 
         let enabled = vec!["good-one".to_string(), "broken".to_string()];
-        let warnings = load_all(&dir, &enabled);
+        let warnings = load_all(&dir, &enabled, Some(&python));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(
             warnings[0].starts_with("plugin broken: RuntimeError: boom"),
             "{warnings:?}"
         );
 
-        let log = fs::read_to_string(dir.join(LOG_FILE)).expect("log written");
+        let log = log_text(&dir);
         assert!(log.contains("good-one 0.1.0: loaded"), "{log}");
-        assert!(log.contains("[good-one] from helper"), "{log}");
+        assert!(log.contains("good-one: from helper"), "{log}");
         assert!(log.contains("broken: failed: RuntimeError: boom"), "{log}");
+        stop_plugin("good-one");
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 登録したコマンドを、Python の専用スレッドで実行する。例外は失敗として返り、ログには書かれない。
-    #[cfg(feature = "python")]
+    /// 登録したコマンドを、プラグインのプロセスで実行する。例外は失敗として返る。
     #[test]
-    fn a_menu_command_runs_on_the_python_thread_and_a_failing_one_reports_it() {
+    fn a_menu_command_runs_in_the_plugin_process_and_a_failing_one_reports_it() {
+        let Some(python) = python_or_skip() else {
+            return;
+        };
         let dir = scratch("command");
-        let plugin = dir.join("cmd");
-        fs::create_dir_all(&plugin).unwrap();
-        fs::write(plugin.join("plugin.yaml"), GOOD.replace("sample", "cmd")).unwrap();
-        fs::write(
-            plugin.join("__init__.py"),
-            concat!(
+        make_plugin(
+            &dir,
+            "cmd",
+            "",
+            Some(concat!(
                 "def register(app):\n",
                 "    def say(ctx, args):\n",
                 "        app.log('said ' + str(args['n']) + ' at ' + str(ctx.target['atom_id']))\n",
@@ -558,77 +576,204 @@ mod tests {
                 "    app.add_command('plugin.cmd.say', say)\n",
                 "    app.add_command('plugin.cmd.fail', fail)\n",
                 "    app.add_menu_item('menu/view', 500, 'Say', 'plugin.cmd.say', {'n': 7})\n",
-            ),
-        )
-        .unwrap();
-
-        let manifest = parse_manifest(&GOOD.replace("sample", "cmd"), "cmd").unwrap();
-        let log = dir.join(LOG_FILE);
-        let contribution = run_register(&plugin, &manifest, &log).expect("registers");
-        assert_eq!(
-            contribution.commands,
-            vec!["plugin.cmd.say".to_string(), "plugin.cmd.fail".to_string()]
+            )),
         );
-        assert_eq!(contribution.items.len(), 1);
+        let warnings = load_all(&dir, &["cmd".to_string()], Some(&python));
+        assert!(warnings.is_empty(), "{warnings:?}");
 
-        let said = send_command(
+        let said = invoke(
+            "cmd",
             "plugin.cmd.say",
             &serde_json::json!({"target": {"kind": "atom", "atom_id": 42}, "args": {"n": 7}}),
         )
-        .expect("the host runs");
-        let outcome = crate::plugin_menu::command_outcome(said.recv().expect("replies"));
+        .expect("the plugin is running");
+        let outcome = crate::plugin_menu::command_outcome(
+            said.recv_timeout(Duration::from_secs(10)).expect("replies"),
+        );
         assert_eq!(outcome, Ok(()));
-        let text = fs::read_to_string(&log).expect("log written");
-        assert!(text.contains("[cmd] said 7 at 42"), "{text}");
+        assert!(
+            log_text(&dir).contains("cmd: said 7 at 42"),
+            "{}",
+            log_text(&dir)
+        );
 
-        let failed =
-            send_command("plugin.cmd.fail", &serde_json::json!({})).expect("the host runs");
-        let outcome = crate::plugin_menu::command_outcome(failed.recv().expect("replies"));
+        let failed = invoke("cmd", "plugin.cmd.fail", &serde_json::json!({}))
+            .expect("the plugin is running");
+        let outcome = crate::plugin_menu::command_outcome(
+            failed
+                .recv_timeout(Duration::from_secs(10))
+                .expect("replies"),
+        );
         assert_eq!(outcome, Err("ValueError: bad".to_string()));
+        stop_plugin("cmd");
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 同梱のサンプル（`examples/plugins/hello-yui`）が、そのまま読めて、コマンドも動く。
-    #[cfg(feature = "python")]
+    /// 同梱のサンプル（`examples/plugins/` の 2 つ）が、そのまま読めて、コマンドも動く。
     #[test]
-    fn the_example_plugin_loads_and_its_command_runs() {
+    fn the_example_plugins_load_and_their_commands_run() {
+        let Some(python) = python_or_skip() else {
+            return;
+        };
         let dir = scratch("example");
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins/hello-yui");
-        let target = dir.join("hello-yui");
-        fs::create_dir_all(&target).unwrap();
-        for file in ["plugin.yaml", "__init__.py"] {
-            fs::copy(source.join(file), target.join(file))
-                .expect("the example is in the repository");
+        let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/plugins");
+        for name in ["hello-yui", "atom-info"] {
+            let target = dir.join(name);
+            fs::create_dir_all(&target).unwrap();
+            for file in ["plugin.yaml", "__init__.py"] {
+                fs::copy(examples.join(name).join(file), target.join(file))
+                    .expect("the example is in the repository");
+            }
         }
 
-        let warnings = load_all(&dir, &["hello-yui".to_string()]);
+        let enabled = vec!["hello-yui".to_string(), "atom-info".to_string()];
+        let warnings = load_all(&dir, &enabled, Some(&python));
         assert!(warnings.is_empty(), "{warnings:?}");
-        let reply = send_command(
+
+        let wait = |reply: Receiver<CommandOutcome>| {
+            crate::plugin_menu::command_outcome(
+                reply
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("replies"),
+            )
+        };
+        let hello = invoke(
+            "hello-yui",
             "plugin.hello-yui.say",
             &serde_json::json!({"target": null, "args": {"greeting": "hi"}}),
         )
-        .expect("the host runs");
-        assert_eq!(
-            crate::plugin_menu::command_outcome(reply.recv().expect("replies")),
-            Ok(())
-        );
-        let text = fs::read_to_string(dir.join(LOG_FILE)).expect("log written");
-        assert!(text.contains("[hello-yui] hi from the View menu"), "{text}");
+        .expect("running");
+        assert_eq!(wait(hello), Ok(()));
+        let atom = invoke(
+            "atom-info",
+            "plugin.atom-info.show",
+            &serde_json::json!({"target": {"kind": "atom", "atom_id": 42}, "args": {}}),
+        )
+        .expect("running");
+        assert_eq!(wait(atom), Ok(()));
+
+        let text = log_text(&dir);
+        assert!(text.contains("hello-yui: hi from the View menu"), "{text}");
+        assert!(text.contains("atom-info: atom 42"), "{text}");
+        stop_plugin("hello-yui");
+        stop_plugin("atom-info");
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[cfg(not(feature = "python"))]
+    /// `command` のあるプラグインは、そのまま実行する（Python でなくてよい）。
     #[test]
-    fn a_build_without_python_says_so() {
-        let dir = scratch("nopython");
-        let plugin = dir.join("sample");
-        fs::create_dir_all(&plugin).unwrap();
-        fs::write(plugin.join("plugin.yaml"), GOOD).unwrap();
-        fs::write(plugin.join("__init__.py"), "def register(app):\n    pass\n").unwrap();
+    fn a_plugin_with_its_own_command_runs_as_it_is() {
+        let dir = scratch("own-command");
+        let program = test_plugin_path();
+        make_plugin(
+            &dir,
+            "test-plugin",
+            &format!("command: [\"{program}\"]\n"),
+            None,
+        );
+        let warnings = load_all(&dir, &["test-plugin".to_string()], None);
+        assert!(warnings.is_empty(), "{warnings:?}");
 
-        let warnings = load_all(&dir, &["sample".to_string()]);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("no Python support"), "{warnings:?}");
+        let echoed = invoke(
+            "test-plugin",
+            "plugin.test-plugin.echo",
+            &serde_json::json!({"target": null, "args": {"n": 3}}),
+        )
+        .expect("running");
+        assert_eq!(
+            crate::plugin_menu::command_outcome(
+                echoed
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("replies")
+            ),
+            Ok(())
+        );
+        stop_plugin("test-plugin");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plugin_that_does_not_fit_the_rules_is_refused_with_a_reason() {
+        let dir = scratch("refused");
+        let program = test_plugin_path();
+
+        // 名前が、プラグインの自己申告と違う
+        make_plugin(&dir, "other", &format!("command: [\"{program}\"]\n"), None);
+        // 都度呼び出しは、まだ対応していない
+        make_plugin(&dir, "later", "mode: oneshot\ncommand: [\"x\"]\n", None);
+        // `command` も `__init__.py` もない
+        make_plugin(&dir, "empty", "", None);
+        // 起動できない `command`
+        make_plugin(
+            &dir,
+            "nobin",
+            "command: [\"yui-no-such-program-xyz\"]\n",
+            None,
+        );
+
+        let enabled: Vec<String> = ["other", "later", "empty", "nobin"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let warnings = load_all(&dir, &enabled, None);
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        let has = |needle: &str| warnings.iter().any(|w| w.contains(needle));
+        assert!(
+            has("says its name is 'test-plugin', not 'other'"),
+            "{warnings:?}"
+        );
+        assert!(has("mode 'oneshot' is not supported yet"), "{warnings:?}");
+        assert!(has("no 'command' and no __init__.py"), "{warnings:?}");
+        assert!(
+            has("cannot start 'yui-no-such-program-xyz'"),
+            "{warnings:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 登録が時間内に届かないプラグイン（`silent` は `hello` だけを送る）は、失敗になる
+    #[test]
+    fn a_plugin_that_never_registers_fails_after_the_wait() {
+        let dir = scratch("quiet");
+        let program = test_plugin_path();
+        make_plugin(
+            &dir,
+            "test-plugin",
+            &format!("command: [\"{program}\", \"silent\"]\n"),
+            None,
+        );
+        let warnings = load_all(&dir, &["test-plugin".to_string()], None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("did not register within 5 seconds"),
+            "{warnings:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_python_points_at_the_setting() {
+        let dir = scratch("no-python");
+        make_plugin(&dir, "pyless", "", Some("def register(app):\n    pass\n"));
+        let warnings = load_all(
+            &dir,
+            &["pyless".to_string()],
+            Some("/no/such/python-for-yui"),
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("cannot start"), "{warnings:?}");
+        assert!(warnings[0].contains("plugins.python"), "{warnings:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_command_for_a_plugin_that_is_not_running_fails_at_once() {
+        let err = invoke(
+            "never-started",
+            "plugin.never-started.x",
+            &serde_json::json!({}),
+        )
+        .unwrap_err();
+        assert!(err.contains("not running"), "{err}");
     }
 }

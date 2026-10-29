@@ -3,10 +3,25 @@
 > [!NOTE]
 > [Japanese version (日本語版)](plugin-authoring.ja.md) is also available.
 
-A YUI plugin is a Python package that adds commands and menu items to the native desktop app. Plugins are written against the public `app` object described below. The design is in [architecture.md](../../architecture.md) §6.4.
+A YUI plugin adds commands and menu items to the native desktop app. A plugin is usually a Python package written against the public `app` object described below. The design is in [architecture.md](../../architecture.md) §6.4.
 
 > [!WARNING]
 > A plugin runs with the same rights as any Python script you run. It is not sandboxed. Enable only plugins you trust.
+
+## How a plugin runs
+
+YUI starts each enabled plugin as its own process and talks to it over the standard input and output of that process. A plugin that crashes or hangs cannot stop YUI.
+
+- A plugin with an `__init__.py` and no `command` in its `plugin.yaml` is a Python package. YUI runs it with a runner that it ships, using the Python named by `plugins.python` in `settings.yaml` (a path or a command name), or `python3` on the `PATH` (`python` on Windows) when that is not set. Python 3.8 or later is needed.
+- Nothing else has to be installed: the runner has its own small msgpack, and it uses the `msgpack` package when that is installed. Packages installed in the chosen Python (for example `numpy`) can be imported by the plugin.
+- What the plugin prints, and anything else it writes to the standard output or the standard error, goes to `plugin.log`.
+- A plugin with a `command` in its `plugin.yaml` is run as it is, so it can be written in any language. The protocol it must speak is in [architecture.md](../../architecture.md) §6.4; a separate guide for it has not been written yet.
+
+```yaml
+plugins:
+  enabled: [hello-yui]
+  python: /usr/bin/python3      # optional; without it, python3 on the PATH is used
+```
 
 ## Folder layout
 
@@ -30,6 +45,8 @@ Each plugin is one folder under the plugins folder of your configuration folder:
 | `api_version` | yes | An integer. Must equal the API version of the app (currently `1`). |
 | `description` | no | One line shown in the plugin list. |
 | `author` | no | Shown in the plugin list. |
+| `command` | no | The program and its arguments, as a list (no shell). Leave it out for a Python package. |
+| `mode` | no | `resident` (the default): one process that runs while YUI runs. `oneshot` (a new process for each command) is not supported yet. |
 
 A plugin whose `plugin.yaml` does not fit is not loaded; the reason is shown in the plugin list and in `plugin.log`.
 
@@ -50,11 +67,11 @@ Changes apply the next time YUI starts.
 
 ### `app.log(message)`
 
-Appends `[<name>] <message>` to `plugin.log` in the plugins folder.
+Appends `<name>: <message>` to `plugin.log` in the plugins folder.
 
 ### `app.add_command(id, func)`
 
-Registers a command. `id` must start with `plugin.<name>.`, so a plugin cannot replace a built-in command or another plugin's command. `func(ctx, args)` is called on the Python thread when the command runs. `func` must be callable.
+Registers a command. `id` must start with `plugin.<name>.`, so a plugin cannot replace a built-in command or another plugin's command. `func(ctx, args)` is called in the plugin's own process when the command runs. `func` must be callable.
 
 ### `app.add_menu_item(location, order, label, command, args=None)`
 
@@ -93,8 +110,10 @@ Every load and every failure is written to `plugin.log` in the plugins folder. T
 - A wrong `plugin.yaml`, or an unsupported `api_version`, means the plugin is not loaded.
 - An exception in `register` means the plugin is not loaded. Nothing it added is kept.
 - An exception in a command disables the plugin for the rest of the session: its menu items disappear and its commands refuse to run.
-- `register` must return within five seconds at startup; otherwise the plugin fails.
-- A command has no time limit. A command that never returns keeps the Python thread busy until YUI quits.
+- If the plugin process cannot start (for example, Python is not found; set `plugins.python`) or ends before it registers, the plugin is not loaded, and the last line it wrote to the standard error is the reason.
+- `register` must finish within five seconds at startup; otherwise the plugin fails.
+- A command has no time limit. A command that never returns keeps that plugin busy until YUI quits; other plugins are not affected.
+- YUI stops every plugin process when it quits.
 
 ## api_version
 
@@ -124,6 +143,7 @@ Copy the folder to `<config>/yui/plugins/hello-yui/`, enable it, restart YUI, an
 ## Not yet available
 
 - Installing plugins with `pip` or entry points. Plugins are folders for now.
-- Third-party packages such as `numpy`: where the embedded Python looks for them is not decided.
+- The `oneshot` mode (a new process for each command).
+- A guide to writing a plugin in a language other than Python.
 - Enabled or checked state computed by Python for a menu item.
 - Calling the app's data (the structure, the selection) from a plugin: a read-only view is planned but not yet defined.

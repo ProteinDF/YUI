@@ -81,7 +81,7 @@ else
     run cargo install trunk --locked
 fi
 
-step "4. Python 3.12 (uv; for --features python and the Python tests)"
+step "4. Python 3.12 (uv; for the core-py tests and the plugin tests)"
 need uv "Install uv first: https://docs.astral.sh/uv/"
 run uv python install 3.12
 

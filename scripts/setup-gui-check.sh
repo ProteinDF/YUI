@@ -4,29 +4,28 @@
 #
 #   1. installs the system packages (needs sudo)
 #   2. shows whether a Vulkan GPU driver is visible
-#   3. builds yui-frontend (with --with-python: against Python 3.12 with libpython)
+#   3. builds yui-frontend
 #   4. creates ~/yui-check/config with the example plugin enabled, for XDG_CONFIG_HOME
 #
 # Usage:
-#   scripts/setup-gui-check.sh [--with-python] [--skip-apt] [--dry-run]
+#   scripts/setup-gui-check.sh [--skip-apt] [--dry-run]
 #
-#   --with-python  build with --features python (needs uv; uses Python 3.12)
-#   --skip-apt     do not install system packages
-#   --dry-run      print what would run, and change nothing
+#   --skip-apt  do not install system packages
+#   --dry-run   print what would run, and change nothing
+#
+# Plugins run as separate processes with python3 from the PATH (or plugins.python in settings.yaml).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-WITH_PYTHON=0
 SKIP_APT=0
 DRY_RUN=0
 for arg in "$@"; do
     case "$arg" in
-        --with-python) WITH_PYTHON=1 ;;
         --skip-apt) SKIP_APT=1 ;;
         --dry-run) DRY_RUN=1 ;;
         -h | --help)
-            sed -n '2,15p' "$0"
+            sed -n '2,16p' "$0"
             exit 0
             ;;
         *)
@@ -82,20 +81,14 @@ if ! command -v cargo >/dev/null; then
 fi
 
 step "4. Build"
-if [[ $WITH_PYTHON -eq 1 ]]; then
-    if ! command -v uv >/dev/null; then
-        echo "uv was not found (needed to get Python 3.12 with libpython): https://docs.astral.sh/uv/" >&2
-        exit 1
-    fi
-    PY="$(uv python find 3.12)"
-    LIBDIR="$("$PY" -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")"
-    export PYO3_PYTHON="$PY"
-    export LD_LIBRARY_PATH="$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    echo "Python: $PY"
-    echo "When you run the app, keep LD_LIBRARY_PATH=$LIBDIR"
-    run cargo build -p yui-frontend --features python
+run cargo build -p yui-frontend
+
+step "4b. Python for the plugins"
+if command -v python3 >/dev/null; then
+    echo "python3: $(command -v python3) ($(python3 --version 2>&1))"
 else
-    run cargo build -p yui-frontend
+    echo "WARNING: python3 was not found. The example plugin cannot run until it is installed" >&2
+    echo "  (or set 'plugins: python:' in settings.yaml to another Python)." >&2
 fi
 
 step "5. Check folder (~/yui-check, not your own settings)"
