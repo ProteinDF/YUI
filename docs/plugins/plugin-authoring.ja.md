@@ -15,7 +15,7 @@ YUI は、有効なプラグインを、1 つずつ別のプロセスとして�
 - `plugin.yaml` に `command` がなく、`__init__.py` があるプラグインは、Python のパッケージです。YUI は、同梱のランナーで動かします。使う Python は、`settings.yaml` の `plugins.python`（パス、またはコマンド名）で、設定がなければ `PATH` の `python3`（Windows では `python`）です。Python 3.8 以降が必要です。
 - ほかに入れるものはありません。ランナーは小さな msgpack を自前で持ち、`msgpack` のパッケージが入っていればそれを使います。選んだ Python に入っているパッケージ（たとえば `numpy`）は、プラグインから import できます。
 - プラグインの `print()` など、標準出力や標準エラーへの書き出しは、`plugin.log` に書かれます。
-- `plugin.yaml` に `command` があるプラグインは、そのまま実行します。どの言語で書いてもかまいません。守るべきプロトコルは [architecture.ja.md](../../architecture.ja.md) の 6.4 節にあります。そのための手引きは、まだ書いていません。
+- `plugin.yaml` に `command` があるプラグインは、そのまま実行します。どの言語で書いてもかまいません。守るべきプロトコルは [plugin-protocol.ja.md](plugin-protocol.ja.md) にあります。
 
 ```yaml
 plugins:
@@ -160,6 +160,5 @@ def register(app):
 ## まだ使えないもの
 
 - `pip` やエントリポイントによるプラグインの導入。今はフォルダーだけです。
-- Python 以外の言語でプラグインを書くための手引き。
 - メニューの項目の、Python で計算する有効・チェックの状態。
 - プラグインからの、アプリのデータ（構造、選択）の参照。読み取り専用の窓口は計画していますが、まだ定義していません。

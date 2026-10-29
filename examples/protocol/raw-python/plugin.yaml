@@ -1,0 +1,6 @@
+name: raw-python
+version: 0.1.0
+api_version: 1
+description: Adds View > Echo (raw protocol). Speaks the plugin protocol directly, without YUI's runner.
+author: YUI project
+command: [python3, plugin.py]

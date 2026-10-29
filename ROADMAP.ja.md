@@ -169,7 +169,7 @@ fast-forwardになる）。6e-iは対象外（既に`develop`へマージ済み�
 - **フェーズ6k-iii — メニューとコマンド（完了）。** 8.7節の受け口を使う `add_command`（識別子は `plugin.<name>.` の下）と `add_menu_item`。右クリックの対象をコマンドに渡す。
 - **フェーズ6k-iv — プラグインの一覧と、プラグインを書く人のための文書（完了）。** アプリのプラグインの一覧（有効・無効、版、状態）、プラグインの書き方の手引き（英語と日本語）、公開 API の一覧、`api_version` の決まり、例のプラグイン。
 - **フェーズ6k-v — プラグインを別のプロセスで動かす（`resident` は完了）。** メッセージのプロトコル（長さ付きの msgpack）、YUI が起動・終了する子プロセス、何も入れなくてよい Python のランナー（`msgpack` のパッケージがあればそれを使う）、`settings.yaml` の `plugins.python`、`plugin.yaml` の `mode` と `command`。`--features python` は要らなくなった。
-- **フェーズ6k-vi — `oneshot` の方式（完了）。** コマンドを呼ぶたびに新しいプロセスを起動する。メニュー項目とコマンドは `plugin.yaml` に書く（`menu_items`、`commands`）。入力と出力は msgpack のファイル（`{input}`、`{output}`）。Python のパッケージは、ランナーで `register(app)` のまま書ける。1 回の失敗でプラグインは外さない。まだ: Python 以外の言語でプラグインを書くための手引き。
+- **フェーズ6k-vi — `oneshot` の方式（完了）。** コマンドを呼ぶたびに新しいプロセスを起動する。メニュー項目とコマンドは `plugin.yaml` に書く（`menu_items`、`commands`）。入力と出力は msgpack のファイル（`{input}`、`{output}`）。Python のパッケージは、ランナーで `register(app)` のまま書ける。1 回の失敗でプラグインは外さない。Python 以外の言語向けのプロトコルの手引き（`docs/plugins/plugin-protocol.ja.md`）と、例（`examples/protocol/raw-python`）。
 
 ### フェーズ7 — QCLObot連携 & 正準MO可視化研究支援機能
 - 11章（`.QCLO.yaml` プレイブック、ステップ再生、ツリー/YAML本文/3Dビューの双方向リンク、`modeler.yml` のDAG表示）。

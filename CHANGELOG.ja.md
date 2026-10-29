@@ -14,6 +14,7 @@
 - アプリの名前を、タイトルとバージョン情報では「YUI」にした。ウィンドウのタイトル、About ダイアログとそのメニュー項目、Web ページのタイトルとバッジ、backend のコンソールの表示、インストーラーの説明、README・ROADMAP・architecture・TESTING の見出しから「結」の字をなくした。ドキュメント本文の「結 (YUI)」の表記は変えていない。
 
 ### 追加
+- Python 以外の言語でプラグインを書くための、プロトコルの手引き（`docs/plugins/plugin-protocol.ja.md`）を付けた。プロトコルを直接話す、完全な例（`examples/protocol/raw-python`）も付けた。
 - プラグインを `oneshot` の方式（`plugin.yaml` の `mode: oneshot`）で動かせるようにした。コマンドを呼ぶたびに新しいプロセスを起動し、動かし続けない。メニュー項目は `plugin.yaml` に書く（`menu_items`、`commands`）。Python のパッケージは、これまでどおり `register(app)` と `func(ctx, args)` を書く。それ以外のプログラムは、`command` の `{input}` と `{output}` にファイルのパスを受け取る。1 回の呼び出しの失敗では、プラグインは外さない。プラグインの手引き、例のプラグイン `examples/plugins/hello-oneshot`、`architecture.ja.md` 6.4節を参照。
 - View →「Plugins...」で、プラグインのフォルダーにあるプラグインを、版・作者・説明・状態（読み込み済み、有効、無効、理由つきの失敗）とともに一覧できる。有効・無効の切り替えは、`settings.yaml` の `plugins: enabled:` に書き、次の起動から効く。プラグインを書く人向けの手引き（`docs/plugins/plugin-authoring.ja.md`）と、例のプラグイン（`examples/plugins/hello-yui`）を付けた。
 - Python プラグインが、コマンドとメニューの項目を追加できるようにした（`app.add_command`、`app.add_menu_item`）。項目は指定した場所（File・View・Help、右クリックのメニュー）に出る。コマンドが失敗したプラグインは外し、理由をステータスバーと `plugin.log` に出す。

@@ -15,7 +15,7 @@ YUI starts each enabled plugin as its own process and talks to it over the stand
 - A plugin with an `__init__.py` and no `command` in its `plugin.yaml` is a Python package. YUI runs it with a runner that it ships, using the Python named by `plugins.python` in `settings.yaml` (a path or a command name), or `python3` on the `PATH` (`python` on Windows) when that is not set. Python 3.8 or later is needed.
 - Nothing else has to be installed: the runner has its own small msgpack, and it uses the `msgpack` package when that is installed. Packages installed in the chosen Python (for example `numpy`) can be imported by the plugin.
 - What the plugin prints, and anything else it writes to the standard output or the standard error, goes to `plugin.log`.
-- A plugin with a `command` in its `plugin.yaml` is run as it is, so it can be written in any language. The protocol it must speak is in [architecture.md](../../architecture.md) §6.4; a separate guide for it has not been written yet.
+- A plugin with a `command` in its `plugin.yaml` is run as it is, so it can be written in any language. The protocol it must speak is described in [plugin-protocol.md](plugin-protocol.md).
 
 ```yaml
 plugins:
@@ -160,6 +160,5 @@ Copy the folder to `<config>/yui/plugins/hello-yui/`, enable it, restart YUI, an
 ## Not yet available
 
 - Installing plugins with `pip` or entry points. Plugins are folders for now.
-- A guide to writing a plugin in a language other than Python.
 - Enabled or checked state computed by Python for a menu item.
 - Calling the app's data (the structure, the selection) from a plugin: a read-only view is planned but not yet defined.
