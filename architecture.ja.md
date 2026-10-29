@@ -609,6 +609,7 @@ editor_layout:
   selection_highlight: glow         # "glow"（既定）、"halo"、"off"（8.9節）
   plugins:
     enabled: []                     # 読み込むプラグインのフォルダー名（`<config>/yui/plugins/` の下。6.4節）。既定は空
+    python: python3                 # Python のプラグインを動かす Python（6.4節）。パスかコマンド名。既定は python3（Windows は python）
   editor:
     font_family: "JetBrains Mono"   # 既定: 同梱の等幅フォント
     font_size: 14                   # ピクセル、6〜72。既定は 14

@@ -4,10 +4,12 @@
 //! `protocol` のメッセージをやり取りする。標準エラーは `plugin.log` に書く。プラグインが落ちても、
 //! 止まっても、YUI は止まらない。そのプラグインの呼び出しが失敗になるだけである。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -36,6 +38,18 @@ pub enum EventError {
     Closed,
 }
 
+/// 標準エラーの最後の行を、いくつ残すか（失敗の理由を知らせるため）
+const STDERR_TAIL_LINES: usize = 8;
+
+/// 標準エラーの読み取りの状態
+#[derive(Default)]
+struct StderrTail {
+    /// 最後の数行
+    lines: Mutex<VecDeque<String>>,
+    /// 読み終えた（プロセスが標準エラーを閉じた）
+    done: AtomicBool,
+}
+
 /// 読み取りのスレッドと呼び出しの側が共有するもの
 struct Shared {
     /// 結果を待っている呼び出し（`id` → 結果の送り先）
@@ -50,11 +64,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// 起動したプラグインの子プロセス
 pub struct ChildPlugin {
-    name: String,
     child: Mutex<Child>,
     stdin: Mutex<Option<ChildStdin>>,
     shared: Arc<Shared>,
     events: Mutex<Receiver<Message>>,
+    stderr: Arc<StderrTail>,
     next_id: AtomicU64,
     stopped: AtomicBool,
 }
@@ -99,36 +113,47 @@ impl ChildPlugin {
             let (shared, name, log) = (shared.clone(), name.to_string(), log.to_path_buf());
             thread::spawn(move || read_loop(&name, stdout, &shared, &events_tx, &log));
         }
+        let tail = Arc::new(StderrTail::default());
         {
-            let (name, log) = (name.to_string(), log.to_path_buf());
+            let (name, log, tail) = (name.to_string(), log.to_path_buf(), tail.clone());
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines() {
-                    match line {
-                        Ok(line) => append_log(&log, &format!("{name}: {line}")),
-                        Err(_) => break,
+                    let Ok(line) = line else { break };
+                    append_log(&log, &format!("{name}: {line}"));
+                    let mut lines = lock(&tail.lines);
+                    if lines.len() == STDERR_TAIL_LINES {
+                        lines.pop_front();
                     }
+                    lines.push_back(line);
                 }
+                tail.done.store(true, Ordering::SeqCst);
             });
         }
 
         Ok(Self {
-            name: name.to_string(),
             child: Mutex::new(child),
             stdin: Mutex::new(Some(stdin)),
             shared,
             events: Mutex::new(events_rx),
+            stderr: tail,
             next_id: AtomicU64::new(1),
             stopped: AtomicBool::new(false),
         })
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     /// プロセスと通信できているか
     pub fn is_alive(&self) -> bool {
         self.shared.alive.load(Ordering::SeqCst)
+    }
+
+    /// 標準エラーの最後の数行。プロセスが標準エラーを閉じるまで、最大 `wait` 待つ
+    /// （終わったばかりのプロセスの、最後の行を取りこぼさないため）。
+    pub fn stderr_tail(&self, wait: Duration) -> Vec<String> {
+        let deadline = Instant::now() + wait;
+        while !self.stderr.done.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        lock(&self.stderr.lines).iter().cloned().collect()
     }
 
     /// プラグインが自分から送るメッセージ（`Hello`、`Register`）を、最大 `timeout` 待って 1 つ受ける。
@@ -177,12 +202,8 @@ impl ChildPlugin {
         }
     }
 
-    /// 標準入力を閉じ、`grace` まで終わるのを待つ。それでも動いていれば止める。
-    pub fn stop(self, grace: Duration) {
-        self.shutdown(grace);
-    }
-
-    fn shutdown(&self, grace: Duration) {
+    /// 標準入力を閉じ、`grace` まで終わるのを待つ。それでも動いていれば止める。何度呼んでもよい。
+    pub fn shutdown(&self, grace: Duration) {
         if self.stopped.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -260,55 +281,55 @@ fn read_loop(
 }
 
 #[cfg(test)]
+/// テスト用のプラグイン（`examples/yui_test_plugin.rs`）の実行ファイル。`cargo test` はサンプルを
+/// 検査するだけで実行ファイルは作らないので、最初に使うとき、同じ設定で `cargo build` して作る。
+pub(crate) fn test_plugin_path() -> String {
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let exe = std::env::current_exe().expect("the test executable");
+        // <target>/<profile>/deps/<test exe>
+        let profile_dir = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("the profile folder");
+        let name = if cfg!(windows) {
+            "yui_test_plugin.exe"
+        } else {
+            "yui_test_plugin"
+        };
+        let path = profile_dir.join("examples").join(name);
+
+        let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+        build.args([
+            "build",
+            "-p",
+            "yui-frontend",
+            "--example",
+            "yui_test_plugin",
+        ]);
+        if profile_dir.file_name().is_some_and(|n| n == "release") {
+            build.arg("--release");
+        }
+        if let Some(target_dir) = profile_dir.parent() {
+            build.arg("--target-dir").arg(target_dir);
+        }
+        let status = build.status().expect("run cargo build for the test plugin");
+        assert!(
+            status.success(),
+            "cargo build --example yui_test_plugin failed"
+        );
+        assert!(path.is_file(), "missing {}", path.display());
+        path.to_string_lossy().into_owned()
+    })
+    .clone()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::OnceLock;
 
     const WAIT: Duration = Duration::from_secs(5);
-
-    /// テスト用のプラグイン（`examples/yui_test_plugin.rs`）の実行ファイル。`cargo test` はサンプルを
-    /// 検査するだけで実行ファイルは作らないので、最初に使うとき、同じ設定で `cargo build` して作る。
-    fn test_plugin() -> String {
-        static PATH: OnceLock<String> = OnceLock::new();
-        PATH.get_or_init(|| {
-            let exe = std::env::current_exe().expect("the test executable");
-            // <target>/<profile>/deps/<test exe>
-            let profile_dir = exe
-                .parent()
-                .and_then(Path::parent)
-                .expect("the profile folder");
-            let name = if cfg!(windows) {
-                "yui_test_plugin.exe"
-            } else {
-                "yui_test_plugin"
-            };
-            let path = profile_dir.join("examples").join(name);
-
-            let mut build = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-            build.args([
-                "build",
-                "-p",
-                "yui-frontend",
-                "--example",
-                "yui_test_plugin",
-            ]);
-            if profile_dir.file_name().is_some_and(|n| n == "release") {
-                build.arg("--release");
-            }
-            if let Some(target_dir) = profile_dir.parent() {
-                build.arg("--target-dir").arg(target_dir);
-            }
-            let status = build.status().expect("run cargo build for the test plugin");
-            assert!(
-                status.success(),
-                "cargo build --example yui_test_plugin failed"
-            );
-            assert!(path.is_file(), "missing {}", path.display());
-            path.to_string_lossy().into_owned()
-        })
-        .clone()
-    }
 
     /// テスト用の一時フォルダー（テストごとに別の名前。終わりに消す）
     struct Scratch(PathBuf);
@@ -343,7 +364,7 @@ mod tests {
     fn start(scratch: &Scratch, mode: &str) -> ChildPlugin {
         ChildPlugin::spawn(
             "test-plugin",
-            &[test_plugin(), mode.to_string()],
+            &[test_plugin_path(), mode.to_string()],
             &scratch.0,
             &scratch.log(),
         )
@@ -464,6 +485,20 @@ mod tests {
     }
 
     #[test]
+    fn the_last_stderr_lines_are_kept_and_returned_once_the_process_has_ended() {
+        let scratch = Scratch::new("tail");
+        let plugin = start(&scratch, "stderr");
+        plugin.recv_event(WAIT).expect("hello");
+        let rx = plugin.invoke("plugin.test-plugin.exit", Value::Nil, Value::Nil);
+        assert!(rx.recv_timeout(WAIT).unwrap().is_err());
+        // プロセスが終わっているので、標準エラーが閉じるのを待って、すぐ返る
+        let started = Instant::now();
+        let tail = plugin.stderr_tail(WAIT);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(tail, ["hello on stderr"]);
+    }
+
+    #[test]
     fn a_plugin_that_never_registers_times_out() {
         let scratch = Scratch::new("silent");
         let plugin = start(&scratch, "silent");
@@ -480,7 +515,7 @@ mod tests {
         let plugin = start(&scratch, "");
         plugin.recv_event(WAIT).expect("hello");
         let started = Instant::now();
-        plugin.stop(WAIT);
+        plugin.shutdown(WAIT);
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
@@ -490,7 +525,7 @@ mod tests {
         let plugin = start(&scratch, "stubborn");
         plugin.recv_event(WAIT).expect("hello");
         let started = Instant::now();
-        plugin.stop(Duration::from_millis(200));
+        plugin.shutdown(Duration::from_millis(200));
         // 終わらないプラグインがあっても、止める側は待ち続けない
         assert!(started.elapsed() < Duration::from_secs(5));
     }

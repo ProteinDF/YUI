@@ -184,6 +184,8 @@ pub struct UserSettings {
     pub ui: UiSettings,
     /// 読み込むプラグインの名前（`plugins: enabled:`）。書かれていなければ空（何も読まない）
     pub plugins_enabled: Vec<String>,
+    /// Python のプラグインを動かす Python（`plugins: python:`）。書かれていなければ `PATH` の `python3`
+    pub plugins_python: Option<String>,
 }
 
 /// 読み込んだ設定と、読み込み中に見つけた問題（警告）
@@ -362,8 +364,8 @@ pub fn parse_settings(
     loaded
 }
 
-/// `plugins:` の項目（`enabled`: 読み込むプラグインの名前の一覧）。
-/// 一覧でない・名前でない項目は無視して、警告する。
+/// `plugins:` の項目（`enabled`: 読み込むプラグインの名前の一覧、`python`: プラグインを動かす Python）。
+/// 一覧でない・名前でない項目、文字列でない `python` は無視して、警告する。
 fn parse_plugins_settings(
     plugins: Option<&serde_yaml::Value>,
     source: &str,
@@ -395,6 +397,17 @@ fn parse_plugins_settings(
         }
         Some(_) => loaded.warnings.push(format!(
             "{source}: 'plugins.enabled' must be a list of plugin names; ignored"
+        )),
+    }
+    match map.get("python") {
+        None | Some(serde_yaml::Value::Null) => {}
+        Some(serde_yaml::Value::String(path)) if !path.trim().is_empty() => {
+            loaded.settings.plugins_python = Some(path.trim().to_string());
+        }
+        // 空の文字列は「指定なし」として扱う
+        Some(serde_yaml::Value::String(_)) => {}
+        Some(_) => loaded.warnings.push(format!(
+            "{source}: 'plugins.python' must be a path or a command name; ignored"
         )),
     }
 }
@@ -1281,6 +1294,39 @@ mod tests {
                 .settings
                 .plugins_enabled
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_plugins_python_is_a_command_or_a_path() {
+        let l = parse_settings("plugins:\n  python: /opt/py/bin/python3\n", "s", &any);
+        assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+        assert_eq!(
+            l.settings.plugins_python.as_deref(),
+            Some("/opt/py/bin/python3")
+        );
+
+        // 空の文字列と、無いときは「指定なし」。警告は出さない
+        for text in ["plugins:\n  python: ''\n", "plugins:\n  enabled: []\n", ""] {
+            let l = parse_settings(text, "s", &any);
+            assert_eq!(l.settings.plugins_python, None, "{text:?}");
+            assert!(l.warnings.is_empty(), "{text:?}: {:?}", l.warnings);
+        }
+
+        // 文字列でなければ無視して、警告する
+        let l = parse_settings("plugins:\n  python: 3\n", "s", &any);
+        assert_eq!(l.settings.plugins_python, None);
+        assert_eq!(l.warnings.len(), 1, "{:?}", l.warnings);
+    }
+
+    #[test]
+    fn test_plugins_python_survives_toggling_a_plugin() {
+        let text = "plugins:\n  python: /opt/py/bin/python3\n  enabled: [a]\n";
+        let out = set_plugins_enabled_in_text(text, &["a".to_string(), "b".to_string()]);
+        assert!(out.contains("python: /opt/py/bin/python3"), "{out}");
+        assert!(
+            out.contains("enabled: [a, b]") || out.contains("- b"),
+            "{out}"
         );
     }
 

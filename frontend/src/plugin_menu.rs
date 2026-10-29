@@ -1,14 +1,13 @@
 //! プラグインのメニューとコマンド（段階 6k-iii、architecture.md §6.4 と §8.7）。
 //!
-//! 起動時に読めたプラグインが `app.add_command` / `app.add_menu_item` で登録したものを、
-//! アプリのコマンドとメニューの受け口に入れる。押されたコマンドは Python の専用スレッドで動かし、
+//! 起動時に読めたプラグインが `register` で宣言したコマンドとメニュー項目（`add_command` / `add_menu_item`）を、
+//! アプリのコマンドとメニューの受け口に入れる。押されたコマンドはプラグインのプロセスに頼み、
 //! UI は待たない。コマンドが失敗したプラグインは、以後その項目を出さず、押せなくする（アプリは止めない）。
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use iced::Task;
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::app::Message;
@@ -16,6 +15,8 @@ use crate::menu::{
     CommandInvocation, CommandItem, CommandRegistry, ItemStyle, MenuContext, MenuItem,
     MenuRegistry, MenuTarget, location,
 };
+use crate::plugin_process::child::CommandOutcome;
+use crate::plugin_process::{convert, protocol};
 
 /// 読み込めたプラグインが登録したもの（起動のとき、アプリを作る前に入る）
 #[derive(Debug, Clone, PartialEq)]
@@ -36,59 +37,45 @@ pub struct ItemSpec {
     pub args: Value,
 }
 
-/// Python 側が `register` のあとに返す内容（JSON）
-#[cfg_attr(not(feature = "python"), allow(dead_code))] // Python が無いビルドでは使わない
-#[derive(Deserialize)]
-struct Export {
+/// プラグインが `register` で宣言した内容を検査する。識別子は `plugin.<name>.` で始まり、場所は §8.7 の一覧にあり、
+/// 項目のコマンドはそのプラグインが宣言したものでなければならない。違えば、そのプラグインは失敗になる。
+pub fn contribution_from_register(
+    plugin: &str,
     commands: Vec<String>,
-    items: Vec<ExportItem>,
-}
-
-#[cfg_attr(not(feature = "python"), allow(dead_code))] // Python が無いビルドでは使わない
-#[derive(Deserialize)]
-struct ExportItem {
-    location: String,
-    order: i32,
-    label: String,
-    command: String,
-    #[serde(default)]
-    args: Value,
-}
-
-/// Python が返した内容を検査する。識別子は `plugin.<name>.` で始まり、場所は §8.7 の一覧にあり、
-/// 項目のコマンドはそのプラグインが登録したものでなければならない。違えば、そのプラグインは失敗になる。
-#[cfg_attr(not(feature = "python"), allow(dead_code))] // Python が無いビルドでは使わない
-pub fn contribution_from_export(plugin: &str, text: &str) -> Result<Contribution, String> {
-    let export: Export =
-        serde_json::from_str(text).map_err(|e| format!("cannot read the menu items ({e})"))?;
+    wire_items: Vec<protocol::MenuItem>,
+) -> Result<Contribution, String> {
     let prefix = format!("plugin.{plugin}.");
-    for id in &export.commands {
+    for id in &commands {
         if !id.starts_with(&prefix) || id.len() == prefix.len() {
             return Err(format!("command id '{id}' must start with '{prefix}'"));
         }
     }
     let mut items = Vec::new();
-    for item in export.items {
+    for item in wire_items {
         if !location::ALL.contains(&item.location.as_str()) {
             return Err(format!("unknown menu location '{}'", item.location));
         }
-        if !export.commands.contains(&item.command) {
+        if !commands.contains(&item.command) {
             return Err(format!(
                 "menu item '{}' uses command '{}', which the plugin did not add",
                 item.label, item.command
             ));
         }
+        let order = i32::try_from(item.order)
+            .map_err(|_| format!("menu item '{}': the order is out of range", item.label))?;
+        let args = convert::to_json(&item.args)
+            .map_err(|e| format!("menu item '{}': args cannot be used ({e})", item.label))?;
         items.push(ItemSpec {
             location: item.location,
-            order: item.order,
+            order,
             label: item.label,
             command: item.command,
-            args: item.args,
+            args,
         });
     }
     Ok(Contribution {
         plugin: plugin.to_string(),
-        commands: export.commands,
+        commands,
         items,
     })
 }
@@ -120,6 +107,8 @@ pub fn mark_failed(plugin: &str, reason: &str) {
     if let Ok(mut failed) = FAILED.lock() {
         failed.insert(plugin.to_string(), reason.to_string());
     }
+    // 失敗したプラグインのプロセスは、残さずに止める
+    crate::plugins::stop_plugin(plugin);
     if let Some(dir) = crate::plugins::plugins_dir() {
         crate::plugins::append_log(
             &dir.join(crate::plugins::LOG_FILE),
@@ -196,18 +185,14 @@ fn target_json(target: Option<&MenuTarget>) -> Value {
     }
 }
 
-/// Python の戻り値を、コマンドの結果にする（空なら成功、文字列なら Python の例外の内容）
-pub fn command_outcome(reply: Result<String, String>) -> Result<(), String> {
-    match reply {
-        Ok(text) if text.is_empty() => Ok(()),
-        Ok(text) => Err(text),
-        Err(reason) => Err(reason),
-    }
+/// プラグインの返事を、コマンドの結果にする（成功なら `Ok`、失敗なら理由。返した値は、今は使わない）
+pub fn command_outcome(reply: CommandOutcome) -> Result<(), String> {
+    reply.map(|_| ())
 }
 
-/// コマンドを Python の専用スレッドで動かす。待つのは別のスレッドで、UI は止めない。
+/// コマンドをプラグインのプロセスに頼む。待つのは別のスレッドで、UI は止めない。
 pub fn run(plugin: String, id: String, payload: Value) -> Task<Message> {
-    let reply = match crate::plugins::send_command(&id, &payload) {
+    let reply = match crate::plugins::invoke(&plugin, &id, &payload) {
         Ok(reply) => reply,
         Err(reason) => {
             return Task::done(Message::PluginCommandDone {
@@ -220,7 +205,7 @@ pub fn run(plugin: String, id: String, payload: Value) -> Task<Message> {
     std::thread::spawn(move || {
         let outcome = reply
             .recv()
-            .map_err(|_| "the Python thread stopped".to_string())
+            .map_err(|_| "the plugin process stopped".to_string())
             .and_then(command_outcome);
         let _ = tx.send(outcome);
     });
@@ -236,16 +221,30 @@ pub fn run(plugin: String, id: String, payload: Value) -> Task<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmpv::Value as Mp;
 
-    const GOOD: &str = r#"{
-        "commands": ["plugin.sample.hello"],
-        "items": [{"location": "menu/view", "order": 150, "label": "Hello",
-                   "command": "plugin.sample.hello", "args": {"n": 1}}]
-    }"#;
+    /// `plugin.sample.hello` を宣言し、`menu/view` に項目を 1 つ出すプラグインの宣言
+    fn good() -> (Vec<String>, Vec<protocol::MenuItem>) {
+        (
+            vec!["plugin.sample.hello".to_string()],
+            vec![protocol::MenuItem {
+                location: "menu/view".into(),
+                order: 150,
+                label: "Hello".into(),
+                command: "plugin.sample.hello".into(),
+                args: Mp::Map(vec![(Mp::from("n"), Mp::from(1))]),
+            }],
+        )
+    }
+
+    fn sample() -> Contribution {
+        let (commands, items) = good();
+        contribution_from_register("sample", commands, items).expect("valid")
+    }
 
     #[test]
     fn accepts_commands_and_items_that_fit_the_rules() {
-        let c = contribution_from_export("sample", GOOD).expect("valid");
+        let c = sample();
         assert_eq!(c.commands, vec!["plugin.sample.hello".to_string()]);
         assert_eq!(c.items.len(), 1);
         assert_eq!(c.items[0].order, 150);
@@ -254,31 +253,44 @@ mod tests {
 
     #[test]
     fn refuses_a_command_outside_the_plugin_namespace() {
-        let text = GOOD.replace("plugin.sample.hello", "file.new");
-        let err = contribution_from_export("sample", &text).unwrap_err();
+        let (_, items) = good();
+        let err = contribution_from_register("sample", vec!["file.new".into()], items.clone())
+            .unwrap_err();
         assert!(err.contains("must start with 'plugin.sample.'"), "{err}");
 
-        let bare = GOOD.replace("plugin.sample.hello", "plugin.sample.");
-        assert!(contribution_from_export("sample", &bare).is_err());
+        let bare = contribution_from_register("sample", vec!["plugin.sample.".into()], items);
+        assert!(bare.is_err());
     }
 
     #[test]
     fn refuses_an_unknown_location_and_an_item_without_its_command() {
-        let location = GOOD.replace("menu/view", "menu/edit");
-        let err = contribution_from_export("sample", &location).unwrap_err();
+        let (commands, mut items) = good();
+        items[0].location = "menu/edit".into();
+        let err = contribution_from_register("sample", commands.clone(), items).unwrap_err();
         assert!(err.contains("unknown menu location 'menu/edit'"), "{err}");
 
-        let command = GOOD.replace(
-            "\"command\": \"plugin.sample.hello\"",
-            "\"command\": \"plugin.sample.other\"",
-        );
-        let err = contribution_from_export("sample", &command).unwrap_err();
+        let (_, mut items) = good();
+        items[0].command = "plugin.sample.other".into();
+        let err = contribution_from_register("sample", commands, items).unwrap_err();
         assert!(err.contains("did not add"), "{err}");
     }
 
     #[test]
+    fn refuses_an_order_or_args_that_cannot_be_used() {
+        let (commands, mut items) = good();
+        items[0].order = i64::from(i32::MAX) + 1;
+        let err = contribution_from_register("sample", commands.clone(), items).unwrap_err();
+        assert!(err.contains("order"), "{err}");
+
+        let (_, mut items) = good();
+        items[0].args = Mp::Binary(vec![1]);
+        let err = contribution_from_register("sample", commands, items).unwrap_err();
+        assert!(err.contains("args"), "{err}");
+    }
+
+    #[test]
     fn a_registered_command_is_passed_to_the_app_with_its_target() {
-        let c = contribution_from_export("sample", GOOD).unwrap();
+        let c = sample();
         let mut commands = CommandRegistry::new();
         let mut menus = MenuRegistry::new();
         register_contributions(std::slice::from_ref(&c), &mut commands, &mut menus);
@@ -311,7 +323,20 @@ mod tests {
 
     #[test]
     fn a_failed_plugin_loses_its_items_and_commands() {
-        let c = contribution_from_export("gone", &GOOD.replace("sample", "gone")).unwrap();
+        let (commands_list, items) = good();
+        let rename = |s: &str| s.replace("sample", "gone");
+        let c = contribution_from_register(
+            "gone",
+            commands_list.iter().map(|s| rename(s)).collect(),
+            items
+                .into_iter()
+                .map(|mut i| {
+                    i.command = rename(&i.command);
+                    i
+                })
+                .collect(),
+        )
+        .unwrap();
         let mut commands = CommandRegistry::new();
         let mut menus = MenuRegistry::new();
         register_contributions(std::slice::from_ref(&c), &mut commands, &mut menus);
@@ -325,15 +350,12 @@ mod tests {
     }
 
     #[test]
-    fn a_python_exception_is_a_failed_command() {
-        assert_eq!(command_outcome(Ok(String::new())), Ok(()));
+    fn a_failed_reply_is_a_failed_command() {
+        assert_eq!(command_outcome(Ok(None)), Ok(()));
+        assert_eq!(command_outcome(Ok(Some(Mp::from(1)))), Ok(()));
         assert_eq!(
-            command_outcome(Ok("ValueError: bad".into())),
+            command_outcome(Err("ValueError: bad".into())),
             Err("ValueError: bad".to_string())
-        );
-        assert_eq!(
-            command_outcome(Err("stopped".into())),
-            Err("stopped".to_string())
         );
     }
 }

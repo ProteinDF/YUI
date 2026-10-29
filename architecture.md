@@ -611,6 +611,7 @@ Settings that belong to the person using the app — not to a project — live i
   selection_highlight: glow         # "glow" (default), "halo" or "off" (§8.9)
   plugins:
     enabled: []                     # plugin folder names under <config>/yui/plugins/ to load (§6.4); none by default
+    python: python3                 # the Python that runs Python plugins (§6.4): a path or a command name; default python3 (python on Windows)
   editor:
     font_family: "JetBrains Mono"   # default: the bundled monospace font
     font_size: 14                   # pixels, 6 - 72; default 14

@@ -5,6 +5,8 @@
 //! `protocol` のメッセージで YUI に送る。
 
 use std::path::Path;
+#[cfg(test)]
+use std::process::Command;
 
 /// ランナーの Python のコード（`python -c` に渡す）
 pub const RUNNER: &str = include_str!("runner.py");
@@ -30,6 +32,20 @@ pub fn command_for(python: &str, folder: &Path, name: &str, version: &str) -> Ve
 }
 
 #[cfg(test)]
+/// 動く Python。見つからない環境（Python が入っていない）では `None`で、テストは読み飛ばす。
+pub(crate) fn find_python() -> Option<String> {
+    [default_python(), "python3", "python"]
+        .into_iter()
+        .find(|candidate| {
+            Command::new(candidate)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        })
+        .map(str::to_string)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::plugin_process::child::ChildPlugin;
@@ -42,19 +58,6 @@ mod tests {
     use std::time::{Duration, Instant};
 
     const WAIT: Duration = Duration::from_secs(10);
-
-    /// 動く Python。見つからない環境（Python が入っていない）では `None`で、テストは読み飛ばす。
-    fn find_python() -> Option<String> {
-        [default_python(), "python3", "python"]
-            .into_iter()
-            .find(|candidate| {
-                Command::new(candidate)
-                    .arg("--version")
-                    .output()
-                    .is_ok_and(|out| out.status.success())
-            })
-            .map(str::to_string)
-    }
 
     /// `msgpack` のパッケージが入っているか
     fn has_msgpack_package(python: &str) -> bool {
@@ -384,7 +387,7 @@ def register(app):
             let plugin = start(python, &scratch, PLUGIN, builtin);
             plugin.recv_event(WAIT).expect("hello");
             let started = Instant::now();
-            plugin.stop(WAIT);
+            plugin.shutdown(WAIT);
             assert!(started.elapsed() < Duration::from_secs(5));
         });
     }
