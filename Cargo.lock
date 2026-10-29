@@ -5950,6 +5950,8 @@ dependencies = [
  "pyo3",
  "reqwest",
  "rfd",
+ "rmp-serde",
+ "rmpv",
  "serde",
  "serde_json",
  "serde_yaml_ng",
