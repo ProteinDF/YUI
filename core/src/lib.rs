@@ -5,6 +5,7 @@ pub mod export;
 pub mod interaction;
 pub mod packing;
 pub mod plot;
+pub mod ramachandran;
 pub mod representation;
 pub mod role;
 pub mod selector;
