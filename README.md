@@ -164,7 +164,7 @@ file APIs closed unless `YUI_ENABLE_TERMINAL=1` / `YUI_ENABLE_FS=1`). Share a se
 
 ### Building on Windows (build and launch checked)
 
-The native app builds with the MSVC toolchain. Building the app and starting it were checked on Windows. The other functions (plugins, the installer, the terminal) have not been checked there yet, so please report any problem you meet.
+The native app builds with the MSVC toolchain. Building the app and starting it were checked on Windows, and so were the setup `.exe` (installing and starting the app) and opening a structure, which showed the 3D view. The other functions (plugins, the terminal, plots) have not been checked there yet, so please report any problem you meet.
 
 1. Install [Rust](https://rustup.rs) with the default MSVC toolchain, and the "Desktop development with C++" workload of the Visual Studio Build Tools.
 2. Install Git (the `proteindf-bridge` dependency is fetched from GitHub).

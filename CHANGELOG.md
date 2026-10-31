@@ -10,6 +10,7 @@ and this project adheres to [Calendar Versioning](https://calver.org/) (`YYYY.MM
 ## [Unreleased]
 
 ### Changed
+- Checked on Windows with a development installer: the setup `.exe` installed, the app started and a structure was shown in 3D. Not checked on Windows: plugins, the terminal, plots.
 - The macOS app is now ad-hoc signed (`signingIdentity = "-"`, no certificate, no notarization). Before, macOS said "YUI.app is damaged and can't be opened" for the downloaded app; now it says it "could not verify" it, and **System Settings → Privacy & Security → Open Anyway** opens it (README, "Installing"). Checked on a Mac with a development build downloaded in a browser: the `.dmg` and then `YUI.app` each needed Open Anyway, and the app opened. The warning itself remains: removing it needs an Apple Developer ID and notarization. Not checked: using the app in detail, and Intel Macs (the dmg is Apple Silicon only).
 - The GitHub workflows now use versions of `actions/checkout`, `actions/setup-python`, `actions/upload-artifact` and `actions/download-artifact` that run on Node.js 24 (the old ones ran on Node.js 20, which GitHub is retiring and warns about). Not checked yet: the changed workflows have not run.
 - `proteindf-bridge` is now pinned to the release tag `2026.10.20` (was `2026.10.7`). It adds the φ/ψ calculation that a coming Ramachandran plot needs; nothing visible changes yet.
