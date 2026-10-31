@@ -10,6 +10,7 @@
 ## [Unreleased]
 
 ### 変更
+- Windows で開発版のインストーラーを使って確かめた: setup `.exe` でインストールでき、アプリが起動し、構造を 3D で表示できた。Windows で未確認: プラグイン、ターミナル、プロット。
 - macOS のアプリに、アドホック署名（`signingIdentity = "-"`。証明書も公証もなし）を付けた。以前は、ダウンロードしたアプリを macOS が「"YUI.app" は壊れているため開けません」と表示したが、今は「検証できませんでした」と表示し、**システム設定 → プライバシーとセキュリティ → このまま開く**で開ける（README の「Installing」）。Mac で、ブラウザで落とした開発版を使って確かめた: `.dmg` と `YUI.app` のそれぞれで「このまま開く」が必要で、アプリは開いた。警告そのものは残る。なくすには Apple Developer ID と公証が要る。未確認: アプリの細かい動作と Intel Mac（dmg は Apple Silicon 向けだけ）。
 - GitHub のワークフローが使う `actions/checkout`、`actions/setup-python`、`actions/upload-artifact`、`actions/download-artifact` を、Node.js 24 で動く版に上げた（古い版は Node.js 20 で動いており、GitHub は廃止を予定して警告を出している）。未確認: 変更したワークフローはまだ動かしていない。
 - `proteindf-bridge` を、リリースタグ `2026.10.20`（これまでは `2026.10.7`）に固定した。このあと作る Ramachandran プロットに必要な、φ/ψ の計算が入っている版。見た目は変わらない。

@@ -164,7 +164,7 @@ YUI_WEB_ROOT=target/web/dist cargo run --release -p yui-backend
 
 ### Windows でのビルド（ビルドと起動を確認）
 
-ネイティブ版は MSVC のツールチェーンでビルドします。Windows で、ビルドと起動を確認しました。そのほかの機能（プラグイン、インストーラー、ターミナル）は、Windows ではまだ確認していません。問題があれば知らせてください。
+ネイティブ版は MSVC のツールチェーンでビルドします。Windows で、ビルドと起動、setup `.exe`（インストールとアプリの起動）、構造を開いて 3D が表示されることを確認しました。そのほかの機能（プラグイン、ターミナル、プロット）は、Windows ではまだ確認していません。問題があれば知らせてください。
 
 1. [Rust](https://rustup.rs) を、既定の MSVC のツールチェーンで入れます。あわせて、Visual Studio Build Tools の「C++ によるデスクトップ開発」を入れます。
 2. Git を入れます（`proteindf-bridge` の依存を GitHub から取得するため）。
