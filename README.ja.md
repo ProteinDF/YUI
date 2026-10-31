@@ -188,9 +188,10 @@ scripts/build-installers.sh          # このマシンの OS 向け: Linux は .
 [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) で作ります（`cargo install cargo-packager --locked`。設定は
 `frontend/Cargo.toml` の `[package.metadata.packager]`）。結果は `target/packager/` に出ます。インストーラーは、その OS の
 上でしか作れません。3 つの OS 向けを作るには、GitHub のワークフロー **Release installers**
-（`.github/workflows/release-installers.yml`）を使います。すべて作ると時間がかかるので、
-手動実行だけです。Actions タブの "Run workflow"、または `gh workflow run release-installers.yml --ref <タグ>`。
-インストーラーは、ワークフローの artifacts として出ます。
+（`.github/workflows/release-installers.yml`）を使います。動くのは次の 2 つの場合だけで、ブランチへの push や
+プルリクエストでは動きません（すべて作ると時間がかかるため）。
+- *手動実行*（Actions タブの "Run workflow"、または `gh workflow run release-installers.yml --ref <ブランチまたはタグ>`）: インストーラーは、ワークフローの artifacts として出ます（14 日間残る）。
+- *CalVer のタグの push*（例: `2026.10.11`。`Cargo.toml` のバージョンと同じにする）: 3 つのビルドのあと、そのタグの GitHub リリースを**下書き**で作り、インストーラーを添付します。ファイルを確かめてから、リリースのページで "Publish" を押します。
 
 **Mac でのローカルのビルド。** cargo-packager を一度インストールしてから、Mac で dmg を作ります。
 1. `cargo install cargo-packager --locked`（初回は時間がかかる）。`cargo packager` は cargo の標準のコマンドではない。この手順を飛ばすと「no such command: `packager`」と出る。
