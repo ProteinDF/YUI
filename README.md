@@ -188,8 +188,9 @@ scripts/build-installers.sh          # this machine's OS: Linux .deb + .AppImage
 Built with [cargo-packager](https://github.com/crabnebula-dev/cargo-packager) (`cargo install cargo-packager --locked`; the
 settings are `[package.metadata.packager]` in `frontend/Cargo.toml`); the results are in `target/packager/`. An
 installer can only be built on its own OS, so for all three use the GitHub workflow **Release installers**
-(`.github/workflows/release-installers.yml`; manual only, because building all of them takes long): "Run workflow" in the Actions tab, or
-`gh workflow run release-installers.yml --ref <tag>`. The installers come out as workflow artifacts.
+(`.github/workflows/release-installers.yml`). It runs in two cases, and never on a push to a branch or a pull request (building all of them takes long):
+- *A manual run* ("Run workflow" in the Actions tab, or `gh workflow run release-installers.yml --ref <branch-or-tag>`): the installers come out as workflow artifacts, kept 14 days.
+- *A pushed CalVer tag* (for example `2026.10.11`, equal to the version in `Cargo.toml`): after the three builds, a **draft** GitHub release for the tag is created with the installers attached. Check the files, then press "Publish" on the release page.
 
 **Building locally (macOS).** Install cargo-packager once, then build the dmg on the Mac:
 1. `cargo install cargo-packager --locked` (the first install takes a while). `cargo packager` is not a cargo built-in: without this step the command reports "no such command: `packager`".

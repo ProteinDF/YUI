@@ -5,16 +5,24 @@ name: Release installers
 #   - Linux:   .deb and .AppImage
 #   - macOS:   .dmg (Apple Silicon)
 #   - Windows: NSIS setup .exe
-# Building all installers takes long (the macOS runner the most), so
-# this workflow runs only when started by hand ("Run workflow" in the Actions tab, or
-# `gh workflow run release-installers.yml --ref <tag-or-branch>`), never on push or pull request.
+# Building all installers takes long (the macOS runner the most), so this workflow runs only
+#   - when a CalVer tag (for example 2026.10.11) is pushed: after the three builds, a DRAFT
+#     GitHub release for that tag is created with the installers attached; a person checks
+#     it and presses "Publish" (the tag must equal the version in Cargo.toml), or
+#   - when started by hand ("Run workflow" in the Actions tab, or
+#     `gh workflow run release-installers.yml --ref <tag-or-branch>`): only the artifacts,
+#     no release.
+# It never runs on a push to a branch or on a pull request.
 # The installers are NOT signed or notarized (no certificates are configured): macOS and Windows
 # warn about an unknown publisher on the first launch (see README, "Installing").
-# The results are uploaded as workflow artifacts (kept 14 days); attach them to the GitHub release by hand.
+# The results are also uploaded as workflow artifacts (kept 14 days).
 # A Windows .msi is not built: the MSI version rules (first field below 256) do not fit the CalVer
 # version (2026.10.4); see architecture.md chapter 9.
 'on':
   workflow_dispatch:
+  push:
+    tags:
+      - '[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*'
 
 permissions:
   contents: read
@@ -70,3 +78,38 @@ jobs:
             target/packager/*.exe
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Draft release
+    # Only for a tag push; a manual run stops after the artifacts.
+    if: github.ref_type == 'tag'
+    needs: installers
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check that the tag is the version in Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version $version in Cargo.toml" >&2
+            exit 1
+          fi
+
+      - name: Download the installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: yui-installer-*
+          path: installers
+          merge-multiple: true
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l installers
+          gh release create "$GITHUB_REF_NAME" installers/* \
+            --draft --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
