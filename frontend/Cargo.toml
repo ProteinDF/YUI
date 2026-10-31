@@ -74,6 +74,11 @@ binaries = [
 ]
 beforePackagingCommand = "cargo build --release -p yui-frontend -p yui-backend"
 
+[package.metadata.packager.macos]
+# "-" はアドホック署名（証明書なし）。Apple Developer の署名ではないので、公証はしない（認証情報がなければ cargo-packager は
+# 公証を飛ばす）。署名のない .app をダウンロードすると macOS が「壊れている」と表示することがあり、その対策の試み。
+signingIdentity = "-"
+
 [package.metadata.packager.deb]
 # 実行時に読み込む共有ライブラリのパッケージ（Debian / Ubuntu）。ビルドしたバイナリは、リンクの上では
 # libc / libm / libgcc だけに依存し（`ldd`）、窓・入力・描画のライブラリは、winit / wgpu が起動時に読み込む。
