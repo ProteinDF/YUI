@@ -10,6 +10,7 @@
 ## [Unreleased]
 
 ### 変更
+- macOS のアプリに、アドホック署名（`signingIdentity = "-"`。証明書も公証もなし）を付けた。以前は、ダウンロードしたアプリを macOS が「"YUI.app" は壊れているため開けません」と表示したが、今は「検証できませんでした」と表示し、**システム設定 → プライバシーとセキュリティ → このまま開く**で開ける（README の「Installing」）。Mac で、ブラウザで落とした開発版を使って確かめた: `.dmg` と `YUI.app` のそれぞれで「このまま開く」が必要で、アプリは開いた。警告そのものは残る。なくすには Apple Developer ID と公証が要る。未確認: アプリの細かい動作と Intel Mac（dmg は Apple Silicon 向けだけ）。
 - GitHub のワークフローが使う `actions/checkout`、`actions/setup-python`、`actions/upload-artifact`、`actions/download-artifact` を、Node.js 24 で動く版に上げた（古い版は Node.js 20 で動いており、GitHub は廃止を予定して警告を出している）。未確認: 変更したワークフローはまだ動かしていない。
 - `proteindf-bridge` を、リリースタグ `2026.10.20`（これまでは `2026.10.7`）に固定した。このあと作る Ramachandran プロットに必要な、φ/ψ の計算が入っている版。見た目は変わらない。
 - Python プラグインを、アプリの中ではなく、YUI が起動・終了する別のプロセスで動かすようにした。プラグインが落ちても、止まっても、YUI は止まらない。`--features python` も `libpython` も要らなくなった。プラグインは、`settings.yaml` の `plugins.python`、なければ `PATH` の `python3` で動く。作者向けの API（`register(app)`、`app.log`、`app.add_command`、`app.add_menu_item`、`ctx.target`）は変わらない。プラグインの `print()` は `plugin.log` に書かれる。`plugin.yaml` に `command` があるプラグインは、そのまま実行する（どの言語でもよい）。`architecture.ja.md` 6.4節を参照。手で確かめたのは、macOS ではプラグインの読み込み、プラグインの一覧、右クリックのメニューからのコマンドで、Windows ではアプリのビルドと起動だけ。`oneshot` の方式は、自動テストでだけ動かしていて、アプリの画面からはまだ確かめていない。

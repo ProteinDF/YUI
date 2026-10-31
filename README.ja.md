@@ -203,9 +203,8 @@ scripts/build-installers.sh          # このマシンの OS 向け: Linux は .
 
 パッケージには、`yui-frontend`（アプリ。メニューなどでは「YUI」）と、任意の `yui-backend` が入っています。
 
-**インストール。** インストーラーは**署名も公証もしていない**ので、最初の起動で警告が出ます。
-- *macOS:* `.dmg` を開き、YUI を Applications にドラッグし、アプリを右クリック →「開く」（または
-  `xattr -dr com.apple.quarantine /Applications/YUI.app`）。
+**インストール。** インストーラーは**Apple の署名も公証もない**（macOS のアプリにはアドホック署名だけある）ので、最初の起動で警告が出ます。
+- *macOS:* `.dmg` を開きます。macOS が「検証できませんでした」と表示するので、メッセージを閉じ、**システム設定 → プライバシーとセキュリティ**を開いて、ブロックされた項目の横の**「このまま開く」**を押します（パスワードを聞かれます）。YUI を Applications にドラッグして開くと、`YUI.app` でも同じ警告が出るので、同じ**「このまま開く」**の操作をします。ターミナルを使うなら、`xattr -cr <.dmg または /Applications/YUI.app>` で、警告の原因の印を消せます。（アドホック署名のないビルドでは「"YUI.app" は壊れているため開けません」と出ましたが、アプリは壊れていませんでした。そのようなビルドでは `xattr -cr` を使ってください。）
 - *Windows:* SmartScreen が「Windows によって PC が保護されました」と出る →「詳細情報」→「実行」。
 - *Linux:* `sudo apt install ./yui-frontend_<version>_amd64.deb`（Vulkan か OpenGL のドライバーが要る）、または
   `chmod +x yui-frontend_<version>_x86_64.AppImage && ./yui-frontend_<version>_x86_64.AppImage`。

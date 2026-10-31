@@ -202,9 +202,8 @@ installer can only be built on its own OS, so for all three use the GitHub workf
 
 The packages contain `yui-frontend` (the app, "YUI" in the menus) and the optional `yui-backend`.
 
-**Installing.** The installers are **not signed or notarized**, so the first launch is warned about:
-- *macOS:* open the `.dmg`, drag YUI to Applications, then right-click the app → Open (or
-  `xattr -dr com.apple.quarantine /Applications/YUI.app`).
+**Installing.** The installers are **not signed by Apple or notarized** (the macOS app only has an ad-hoc signature), so the first launch is warned about:
+- *macOS:* open the `.dmg`. macOS says it "could not verify" the file: close the message, open **System Settings → Privacy & Security**, and press **Open Anyway** next to the blocked item (it asks for your password). Drag YUI to Applications and open it; the same warning and the same **Open Anyway** step apply once more for `YUI.app`. If you prefer the Terminal, `xattr -cr <the .dmg or /Applications/YUI.app>` removes the mark that causes the warning. (A build without the ad-hoc signature said "YUI.app is damaged and can't be opened"; the app was not damaged. Use `xattr -cr` for such a build.)
 - *Windows:* SmartScreen says "Windows protected your PC" → More info → Run anyway.
 - *Linux:* `sudo apt install ./yui-frontend_<version>_amd64.deb` (it needs a Vulkan or OpenGL driver), or
   `chmod +x yui-frontend_<version>_x86_64.AppImage && ./yui-frontend_<version>_x86_64.AppImage`.
