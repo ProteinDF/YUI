@@ -193,6 +193,8 @@ scripts/build-installers.sh          # このマシンの OS 向け: Linux は .
 - *手動実行*（Actions タブの "Run workflow"、または `gh workflow run release-installers.yml --ref <ブランチまたはタグ>`）: インストーラーは、ワークフローの artifacts として出ます（14 日間残る）。
 - *CalVer のタグの push*（例: `2026.10.11`。`Cargo.toml` のバージョンと同じにする）: 3 つのビルドのあと、そのタグの GitHub リリースを**下書き**で作り、インストーラーを添付します。ファイルを確かめてから、リリースのページで "Publish" を押します。
 
+**開発版。** `develop` への push のたび（`*.md` だけの変更を除く）に、ワークフロー **Development installers**（`.github/workflows/dev-installers.yml`。手動でも動かせる: `gh workflow run dev-installers.yml --ref develop`）がインストーラーを作り、`dev-<日付>-<コミット>` という名前の GitHub の**プレリリース**として公開します。不安定で署名もありません。普通に使うときは、Pre-release の印がないリリースを使ってください。残すのは新しい 10 個だけで、古い `dev-` のプレリリースはタグごと削除されます（ワークフローの `KEEP`）。`main` からのリリースは、これでは削除されません。
+
 **Mac でのローカルのビルド。** cargo-packager を一度インストールしてから、Mac で dmg を作ります。
 1. `cargo install cargo-packager --locked`（初回は時間がかかる）。`cargo packager` は cargo の標準のコマンドではない。この手順を飛ばすと「no such command: `packager`」と出る。
 2. リポジトリの直下で、`develop` に切り替えて最新にする: `git checkout develop && git pull`。

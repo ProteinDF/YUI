@@ -20,6 +20,8 @@ name: Release installers
 # version (2026.10.4); see architecture.md chapter 9.
 'on':
   workflow_dispatch:
+  # Called by dev-installers.yml (the development builds); the draft-release job below stays skipped there.
+  workflow_call:
   push:
     tags:
       - '[0-9][0-9][0-9][0-9].[0-9]*.[0-9]*'
@@ -46,7 +48,7 @@ jobs:
             formats: nsis
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -68,7 +70,7 @@ jobs:
         run: cargo packager --release -f ${{ matrix.formats }}
 
       - name: Upload the installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: yui-installer-${{ runner.os }}
           path: |
@@ -89,7 +91,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Check that the tag is the version in Cargo.toml
         run: |
@@ -100,7 +102,7 @@ jobs:
           fi
 
       - name: Download the installers
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: yui-installer-*
           path: installers
