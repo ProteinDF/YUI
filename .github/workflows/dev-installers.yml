@@ -1,0 +1,80 @@
+name: Development installers
+
+# Builds the installers (Linux, macOS, Windows) for every push to `develop` and publishes them as a
+# GitHub PRE-RELEASE named dev-<date>-<commit> (the builds are those of release-installers.yml, which this
+# workflow calls). Only the newest KEEP development pre-releases are kept: older ones are deleted
+# together with their tags. Releases whose tag does not start with "dev-" and that are not
+# pre-releases (the CalVer releases from main) are never touched.
+# Development builds are unstable and, like the releases, NOT signed or notarized.
+# Also startable by hand ("Run workflow" in the Actions tab, or
+# `gh workflow run dev-installers.yml --ref develop`).
+'on':
+  push:
+    branches: [develop]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+# A newer push replaces a build that is still running (the macOS runner is slow).
+concurrency:
+  group: dev-installers
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # How many development pre-releases to keep.
+  KEEP: 10
+
+jobs:
+  build:
+    name: Build the installers
+    # The called workflow has a job that asks for contents: write (the draft release on a tag);
+    # GitHub checks that at parse time even though the job is skipped here.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-installers.yml
+
+  publish:
+    name: Publish the pre-release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download the installers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: yui-installer-*
+          path: installers
+          merge-multiple: true
+
+      - name: Create the pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          short="${GITHUB_SHA::7}"
+          tag="dev-$(date -u +%Y%m%d)-$short"
+          ls -l installers
+          gh release create "$tag" installers/* \
+            --prerelease --target "$GITHUB_SHA" --title "Development build $tag" \
+            --notes "Development build of \`develop\` at commit $short (version in Cargo.toml: $version). Unstable and not signed or notarized. For normal use, take a release without the Pre-release label."
+
+      - name: Delete old development pre-releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Only pre-releases whose tag starts with "dev-"; newest KEEP stay.
+          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
+            | jq -r --argjson keep "$KEEP" \
+                '[.[] | select(.isPrerelease and (.tagName | startswith("dev-")))]
+                 | sort_by(.createdAt) | reverse | .[$keep:] | .[].tagName' \
+            | while read -r old; do
+                echo "deleting $old"
+                gh release delete "$old" --cleanup-tag --yes
+              done

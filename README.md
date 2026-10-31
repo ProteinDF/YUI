@@ -192,6 +192,8 @@ installer can only be built on its own OS, so for all three use the GitHub workf
 - *A manual run* ("Run workflow" in the Actions tab, or `gh workflow run release-installers.yml --ref <branch-or-tag>`): the installers come out as workflow artifacts, kept 14 days.
 - *A pushed CalVer tag* (for example `2026.10.11`, equal to the version in `Cargo.toml`): after the three builds, a **draft** GitHub release for the tag is created with the installers attached. Check the files, then press "Publish" on the release page.
 
+**Development builds.** Every push to `develop` (except one that changes only `*.md` files) also builds the installers with the workflow **Development installers** (`.github/workflows/dev-installers.yml`; also startable by hand: `gh workflow run dev-installers.yml --ref develop`) and publishes them as a GitHub **pre-release** named `dev-<date>-<commit>`. They are unstable and unsigned; for normal use take a release without the Pre-release label. Only the newest 10 are kept: older `dev-` pre-releases are deleted with their tags (`KEEP` in the workflow). A release from `main` is never deleted by this.
+
 **Building locally (macOS).** Install cargo-packager once, then build the dmg on the Mac:
 1. `cargo install cargo-packager --locked` (the first install takes a while). `cargo packager` is not a cargo built-in: without this step the command reports "no such command: `packager`".
 2. In the repository root, on `develop` and up to date: `git checkout develop && git pull`.
