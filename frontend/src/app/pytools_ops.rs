@@ -24,10 +24,11 @@ pub(crate) struct PytoolsMapCache {
     map: Rc<Result<AtomMap, AtomMapError>>,
 }
 
-/// File → Open Plot (pytools JSON)... のダイアログ。ファイル名と中身の文字列を返す（キャンセルは `None`）。
+/// File → Open Plot (pytools)... のダイアログ。ファイル名と中身の文字列を返す（キャンセルは `None`）。
 pub async fn open_plot_dialog() -> Result<Option<(String, String)>, String> {
     let Some(handle) = rfd::AsyncFileDialog::new()
-        .add_filter("pytools plot", &["json"])
+        // "json" is read only until ProteinDF_pytools writes YAML (a transitional measure).
+        .add_filter("pytools plot", &["yaml", "yml", "json"])
         .pick_file()
         .await
     else {
@@ -115,7 +116,7 @@ impl Yui {
         let subtle = crate::ui_style::palette().text_subtle;
         let Some(state) = &self.pytools_plot else {
             return container(
-                text("No plot is open. Use File → Open Plot (pytools JSON)...")
+                text("No plot is open. Use File → Open Plot (pytools)...")
                     .size(12)
                     .color(subtle),
             )

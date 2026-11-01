@@ -1,4 +1,4 @@
-//! Reader for the plot JSON written by `ProteinDF_pytools` (`pdf-plot-pop.py --json`, UI-free).
+//! Reader for the plot data written by `ProteinDF_pytools` (YAML, or the JSON of `pdf-plot-pop.py --json`; UI-free).
 //!
 //! The format is `pdf-plot/1`. Every point names the ProteinDF atom it belongs to (1-based, in the
 //! order of the ProteinDF input), and the file lists those atoms. This module only turns the file
@@ -49,7 +49,7 @@ pub enum PytoolsPlotError {
 impl fmt::Display for PytoolsPlotError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Malformed(m) => write!(f, "malformed plot JSON: {m}"),
+            Self::Malformed(m) => write!(f, "malformed plot data: {m}"),
             Self::UnsupportedSchema(s) => {
                 write!(
                     f,
@@ -59,7 +59,7 @@ impl fmt::Display for PytoolsPlotError {
             Self::UnsupportedKind(k) => {
                 write!(f, "unsupported plot kind \"{k}\" (only \"scatter\")")
             }
-            Self::Inconsistent(m) => write!(f, "inconsistent plot JSON: {m}"),
+            Self::Inconsistent(m) => write!(f, "inconsistent plot data: {m}"),
         }
     }
 }
@@ -115,13 +115,13 @@ struct RawPoint {
     atom: u32,
 }
 
-/// Parse a pytools plot JSON.
+/// Parse a pytools plot, written as YAML or as JSON (JSON is read by the YAML reader).
 ///
 /// Unknown fields are ignored. The schema is checked first, so a file of another version is
 /// reported as such instead of as a missing field.
-pub fn parse_pytools_plot(json: &str) -> Result<PytoolsPlot, PytoolsPlotError> {
+pub fn parse_pytools_plot(text: &str) -> Result<PytoolsPlot, PytoolsPlotError> {
     let header: RawHeader =
-        serde_json::from_str(json).map_err(|e| PytoolsPlotError::Malformed(e.to_string()))?;
+        serde_yaml::from_str(text).map_err(|e| PytoolsPlotError::Malformed(e.to_string()))?;
     if header.schema != SCHEMA {
         return Err(PytoolsPlotError::UnsupportedSchema(header.schema));
     }
@@ -129,7 +129,7 @@ pub fn parse_pytools_plot(json: &str) -> Result<PytoolsPlot, PytoolsPlotError> {
         return Err(PytoolsPlotError::UnsupportedKind(kind));
     }
     let raw: RawPlot =
-        serde_json::from_str(json).map_err(|e| PytoolsPlotError::Malformed(e.to_string()))?;
+        serde_yaml::from_str(text).map_err(|e| PytoolsPlotError::Malformed(e.to_string()))?;
     if raw.kind != "scatter" {
         return Err(PytoolsPlotError::UnsupportedKind(raw.kind));
     }
@@ -260,6 +260,48 @@ mod tests {
         assert!(matches!(err, PytoolsPlotError::UnsupportedSchema(_)));
     }
 
+    /// The same data as `SAMPLE`, written as YAML (what a person would write or edit).
+    const SAMPLE_YAML: &str = r#"
+schema: pdf-plot/1
+kind: scatter
+title: Mulliken charge difference
+axes:
+  x: {label: atom index, unit: null}
+  y: {label: Mulliken charge difference, unit: e}
+atoms:
+  - {index: 1, element: O, label: ""}
+  - {index: 2, element: H, label: ""}
+  - {index: 3, element: H, label: ""}
+series:
+  - name: charge
+    points:
+      - {x: 1, y: -0.2, atom: 1}
+      - {x: 2, y: 0.1, atom: 2}
+      - {x: 3, y: 0.1, atom: 3}
+"#;
+
+    #[test]
+    fn reads_yaml_like_json() {
+        let from_yaml = parse_pytools_plot(SAMPLE_YAML).unwrap();
+        assert_eq!(from_yaml.title, "Mulliken charge difference");
+        assert_eq!(from_yaml.atoms.len(), 3);
+        assert_eq!(from_yaml.plot.series[0].points.len(), 3);
+        assert_eq!(
+            from_yaml.plot.y_axis.label,
+            "Mulliken charge difference [e]"
+        );
+        let from_json = parse_pytools_plot(SAMPLE).unwrap();
+        assert_eq!(from_yaml.atoms, from_json.atoms);
+    }
+
+    #[test]
+    fn yaml_keeps_no_as_an_element_name() {
+        // YAML 1.1 reads a bare `No` or `on` as a boolean; an element is always read as text.
+        let yaml = SAMPLE_YAML.replace("element: O,", "element: No,");
+        let plot = parse_pytools_plot(&yaml).unwrap();
+        assert_eq!(plot.atoms[0].element, "No");
+    }
+
     #[test]
     fn rejects_other_kinds() {
         let err = parse_pytools_plot(&replace("\"scatter\"", "\"bar\"")).unwrap_err();
@@ -267,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_json_and_missing_fields() {
+    fn rejects_non_plot_text_and_missing_fields() {
         assert!(matches!(
             parse_pytools_plot("not json"),
             Err(PytoolsPlotError::Malformed(_))

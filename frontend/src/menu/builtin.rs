@@ -498,7 +498,7 @@ fn register_file_menu(menus: &mut MenuRegistry) {
                 .enabled(ctx.has_cube),
             ),
             MenuItem::Separator,
-            dropdown_item("Open Plot (pytools JSON)...", "file.open_plot"),
+            dropdown_item("Open Plot (pytools)...", "file.open_plot"),
         ]
     });
     menus.contribute(FILE, 200, |_| {
@@ -1128,7 +1128,7 @@ mod tests {
             "Open CUBE (Isosurface)...",
             "Close CUBE [disabled]",
             "---",
-            "Open Plot (pytools JSON)...",
+            "Open Plot (pytools)...",
             "---",
             "New Text File",
             "Open Text File...",
@@ -1343,7 +1343,7 @@ mod tests {
             ("Close Trajectory", m("FileCloseTrajectory")),
             ("Open CUBE (Isosurface)...", m("FileOpenCube")),
             ("Close CUBE", m("FileCloseCube")),
-            ("Open Plot (pytools JSON)...", m("FileOpenPlot")),
+            ("Open Plot (pytools)...", m("FileOpenPlot")),
             ("New Text File", m("FileNewTextFile")),
             ("Open Text File...", m("FileOpenTextFile")),
         ];
