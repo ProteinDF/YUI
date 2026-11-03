@@ -115,6 +115,69 @@ pub(crate) fn orbit_camera(cam: &mut CameraState, yaw: f32, pitch: f32) {
     ];
 }
 
+/// `turn_camera` が回す軸
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)] // 動きのファイル（architecture.md 8.13 節）が使う。UI より先に、関数とテストだけを置く。
+pub(crate) enum TurnAxis {
+    /// 画面の右向きの軸
+    ScreenX,
+    /// 画面の上向きの軸
+    ScreenY,
+    /// 画面から手前（見ている人の側）へ向かう軸
+    ScreenZ,
+    /// ワールド座標の、任意のベクトルの軸（長さは問わない。0 や NaN は何もしない）
+    World([f32; 3]),
+}
+
+/// 単位ベクトル `axis` のまわりに、`v` を `angle`（ラジアン、右手系）だけ回す（ロドリゲスの回転公式）。
+fn rotate_about(v: [f32; 3], axis: [f32; 3], angle: f32) -> [f32; 3] {
+    use crate::math::{vec3_add, vec3_cross, vec3_dot, vec3_scale};
+    let (s, c) = angle.sin_cos();
+    let term1 = vec3_scale(v, c);
+    let term2 = vec3_scale(vec3_cross(axis, v), s);
+    let term3 = vec3_scale(axis, vec3_dot(axis, v) * (1.0 - c));
+    vec3_add(vec3_add(term1, term2), term3)
+}
+
+/// 分子を、注視点を通る軸のまわりに `angle`（ラジアン、右手系）だけ回して見えるよう、カメラを動かす。
+///
+/// - 角度の向き: 軸の先から原点を見て、反時計回りが正（ChimeraX の `turn` と同じ）。
+///   たとえば `ScreenY` に +90° だと、画面の右にあった点は、奥へ回り込む。
+/// - カメラは、分子の回転の逆向きに動かす（注視点のまわりに `eye` と `up` を回す）。距離と `fov` は変わらない。
+/// - ターンテーブルの `orbit_camera` と違い、`up` も一緒に回る。仰角の制限はなく、真上や真下も越えられる。
+/// - 画面の軸（`ScreenX` / `ScreenY` / `ScreenZ`）は、この呼び出しの前のカメラの向きで決める。
+/// - 軸が 0 ベクトル、NaN、無限大のとき、角度が有限でないとき、`eye` と `target` が近すぎるときは、何もしない。
+#[allow(dead_code)] // `TurnAxis` と同じ
+pub(crate) fn turn_camera(cam: &mut CameraState, axis: TurnAxis, angle: f32) {
+    use crate::math::{vec3_cross, vec3_length, vec3_scale, vec3_sub};
+    if !angle.is_finite() {
+        return;
+    }
+    let offset = vec3_sub(cam.eye, cam.target);
+    if vec3_length(offset) < 1e-4 {
+        return;
+    }
+    let forward = vec3_normalize(vec3_sub(cam.target, cam.eye));
+    let right = vec3_normalize(vec3_cross(forward, cam.up));
+    let up = vec3_cross(right, forward);
+    let axis_vec = match axis {
+        TurnAxis::ScreenX => right,
+        TurnAxis::ScreenY => up,
+        TurnAxis::ScreenZ => vec3_scale(forward, -1.0),
+        TurnAxis::World(v) => v,
+    };
+    if !axis_vec.iter().all(|x| x.is_finite()) || vec3_length(axis_vec) < 1e-6 {
+        return;
+    }
+    let axis_unit = vec3_normalize(axis_vec);
+
+    // 分子を +angle 回すのは、カメラを -angle 回すのと同じ見え方になる
+    let eye_offset = rotate_about(offset, axis_unit, -angle);
+    let new_up = vec3_normalize(rotate_about(cam.up, axis_unit, -angle));
+    cam.eye = crate::math::vec3_add(cam.target, eye_offset);
+    cam.up = new_up;
+}
+
 /// カメラのズーム（距離伸縮）
 pub(crate) fn zoom_camera(cam: &mut CameraState, factor: f32) {
     let eye = cam.eye;
@@ -201,6 +264,155 @@ pub(crate) fn drag_zoom_factor(dy: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::math::{vec3_cross, vec3_normalize, vec3_sub};
+
+    /// 分子の点 `p` を、カメラから見た画面の座標（右、上、手前）で返す
+    fn screen_coords(cam: &CameraState, p: [f32; 3]) -> [f32; 3] {
+        let f = vec3_normalize(vec3_sub(cam.target, cam.eye));
+        let r = vec3_normalize(vec3_cross(f, cam.up));
+        let u = vec3_cross(r, f);
+        let d = vec3_sub(p, cam.target);
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        [dot(d, r), dot(d, u), -dot(d, f)]
+    }
+
+    fn assert_close(a: [f32; 3], b: [f32; 3]) {
+        for k in 0..3 {
+            assert!((a[k] - b[k]).abs() < 1e-3, "{a:?} != {b:?}");
+        }
+    }
+
+    fn tilted_camera() -> CameraState {
+        let mut cam = CameraState {
+            eye: [3.0, 4.0, 20.0],
+            target: [1.0, -2.0, 0.5],
+            up: [0.0, 1.0, 0.0],
+            fov: 45.0,
+        };
+        // 上方向を、視線に垂直にそろえる（実際のカメラと同じ）
+        let f = vec3_normalize(vec3_sub(cam.target, cam.eye));
+        let r = vec3_normalize(vec3_cross(f, cam.up));
+        cam.up = vec3_cross(r, f);
+        cam
+    }
+
+    #[test]
+    fn turn_screen_y_moves_the_right_side_away() {
+        // 画面の上の軸に +90°: 画面の右にあった点は、奥へ回り込む（右手系）
+        let mut cam = default_test_camera();
+        let p = [cam.target[0] + 5.0, cam.target[1], cam.target[2]];
+        turn_camera(&mut cam, TurnAxis::ScreenY, std::f32::consts::FRAC_PI_2);
+        assert_close(screen_coords(&cam, p), [0.0, 0.0, -5.0]);
+    }
+
+    #[test]
+    fn turn_screen_x_moves_the_top_toward_the_viewer() {
+        // 画面の右の軸に +90°: 画面の上にあった点は、奥へ向かう
+        let mut cam = default_test_camera();
+        let p = [cam.target[0], cam.target[1] + 5.0, cam.target[2]];
+        turn_camera(&mut cam, TurnAxis::ScreenX, std::f32::consts::FRAC_PI_2);
+        assert_close(screen_coords(&cam, p), [0.0, 0.0, 5.0]);
+    }
+
+    #[test]
+    fn turn_screen_z_rolls_the_view() {
+        // 手前向きの軸に +90°: 画面の右にあった点は、上へ回る
+        let mut cam = default_test_camera();
+        let p = [cam.target[0] + 5.0, cam.target[1], cam.target[2]];
+        turn_camera(&mut cam, TurnAxis::ScreenZ, std::f32::consts::FRAC_PI_2);
+        assert_close(screen_coords(&cam, p), [0.0, 5.0, 0.0]);
+    }
+
+    fn default_test_camera() -> CameraState {
+        CameraState {
+            eye: [0.0, 0.0, 30.0],
+            target: [0.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov: 45.0,
+        }
+    }
+
+    #[test]
+    fn turn_keeps_distance_fov_and_an_orthonormal_up() {
+        let mut cam = tilted_camera();
+        let dist0 = crate::math::vec3_length(vec3_sub(cam.eye, cam.target));
+        for (axis, deg) in [
+            (TurnAxis::ScreenX, 37.0),
+            (TurnAxis::ScreenY, -81.0),
+            (TurnAxis::World([1.0, 2.0, -3.0]), 123.0),
+            (TurnAxis::ScreenZ, 200.0),
+        ] {
+            turn_camera(&mut cam, axis, f32::to_radians(deg));
+        }
+        let off = vec3_sub(cam.eye, cam.target);
+        assert!((crate::math::vec3_length(off) - dist0).abs() < 1e-3);
+        assert_eq!(cam.fov, 45.0);
+        assert!((crate::math::vec3_length(cam.up) - 1.0).abs() < 1e-4);
+        let dot = off[0] * cam.up[0] + off[1] * cam.up[1] + off[2] * cam.up[2];
+        assert!(
+            dot.abs() < 1e-2,
+            "up must stay perpendicular to the view: {dot}"
+        );
+    }
+
+    #[test]
+    fn turn_full_circle_returns_to_start() {
+        let mut cam = tilted_camera();
+        let start = cam.clone();
+        for _ in 0..8 {
+            turn_camera(
+                &mut cam,
+                TurnAxis::World([0.3, 1.0, 0.2]),
+                std::f32::consts::FRAC_PI_4,
+            );
+        }
+        assert_close(cam.eye, start.eye);
+        assert_close(cam.up, start.up);
+    }
+
+    #[test]
+    fn turn_goes_over_the_pole_without_a_clamp() {
+        // 画面の右の軸に 120°: ターンテーブル（仰角 ±86° に制限）では行けない向きまで回る。
+        let mut cam = default_test_camera();
+        turn_camera(&mut cam, TurnAxis::ScreenX, f32::to_radians(120.0));
+        let off = vec3_sub(cam.eye, cam.target);
+        // 視点は、真上を越えて反対側（-z 側）に回っている
+        assert!(off[2] < 0.0, "{off:?}");
+        assert!(cam.up[1] < 0.0, "{:?}", cam.up);
+    }
+
+    #[test]
+    fn turn_ignores_invalid_input() {
+        let base = tilted_camera();
+        for (axis, angle) in [
+            (TurnAxis::World([0.0, 0.0, 0.0]), 1.0),
+            (TurnAxis::World([f32::NAN, 0.0, 1.0]), 1.0),
+            (TurnAxis::World([f32::INFINITY, 0.0, 0.0]), 1.0),
+            (TurnAxis::ScreenY, f32::NAN),
+            (TurnAxis::ScreenY, f32::INFINITY),
+        ] {
+            let mut cam = base.clone();
+            turn_camera(&mut cam, axis, angle);
+            assert_eq!(cam, base);
+        }
+        let mut same = CameraState {
+            eye: [1.0; 3],
+            target: [1.0; 3],
+            ..base.clone()
+        };
+        let before = same.clone();
+        turn_camera(&mut same, TurnAxis::ScreenY, 1.0);
+        assert_eq!(same, before);
+    }
+
+    #[test]
+    fn turn_world_axis_length_does_not_matter() {
+        let mut a = tilted_camera();
+        let mut b = tilted_camera();
+        turn_camera(&mut a, TurnAxis::World([0.0, 1.0, 0.0]), 0.7);
+        turn_camera(&mut b, TurnAxis::World([0.0, 25.0, 0.0]), 0.7);
+        assert_close(a.eye, b.eye);
+        assert_close(a.up, b.up);
+    }
 
     /// 点がカメラの縦・横の画角に収まっているか
     fn inside_view(cam: &CameraState, aspect: f32, p: [f32; 3]) -> bool {
