@@ -14,6 +14,8 @@ mod log_viewer;
 mod math;
 mod menu;
 mod menu_bar;
+#[allow(dead_code)] // 2b で書き出しから使う（architecture.md 8.13 節）
+mod motion;
 mod movie_export;
 mod named_selections;
 mod pane_view;
