@@ -40,6 +40,8 @@ pub(crate) struct MovieJob {
     pub frames: Vec<ZipEntry>,
     pub bytes_kept: usize,
     pub renderer: Option<SharedRenderer>,
+    /// 動きのファイルの書き出しで、読み込んだ動き（`options.source` が `Motion` のとき）
+    pub motion: Option<std::sync::Arc<crate::motion::Motion>>,
     /// 再生のフレームの書き出しで、分子表面の表現があるときの、頂点の色の情報
     pub surface_ctx: Option<std::sync::Arc<crate::surface_render::SurfaceColorContext>>,
 }
@@ -71,8 +73,11 @@ impl Yui {
             ));
             return;
         }
-        // フレームが 2 つ未満なら、再生のフレームは選べない
-        if self.movie_options.source == MovieSource::Playback && self.frame_count() < 2 {
+        // フレームが 2 つ未満なら、再生のフレームは選べない。動きのファイルがなければ、それも選べない
+        if (self.movie_options.source == MovieSource::Playback && self.frame_count() < 2)
+            || (self.movie_options.source == MovieSource::Motion
+                && self.movie_motion.motion().is_none())
+        {
             self.movie_options.source = MovieSource::Spin;
         }
         self.movie_dialog = true;
@@ -85,9 +90,26 @@ impl Yui {
                 self.movie_dialog = false;
                 Task::none()
             }
+            MovieDialogAction::ChooseMotionFile => Task::perform(
+                crate::movie_export::open_motion_dialog(),
+                Message::MovieMotionOpened,
+            ),
             MovieDialogAction::Start => {
                 self.movie_dialog = false;
-                let options = self.movie_options;
+                let mut options = self.movie_options;
+                // 動きのファイルでは、枚数と 1 秒あたりの枚数をファイルが決める
+                let motion = if options.source == MovieSource::Motion {
+                    let Some(m) = self.movie_motion.motion().cloned() else {
+                        self.status_message = Some(StatusMessage::error(
+                            "Export failed: choose a valid motion file first.".to_string(),
+                        ));
+                        return Task::none();
+                    };
+                    options.fps = m.fps;
+                    Some(m)
+                } else {
+                    None
+                };
                 let (size, camera) = match self
                     .export_canvas(&options.canvas, options.width)
                     .and_then(|((w, h), cam)| {
@@ -102,7 +124,7 @@ impl Yui {
                         return Task::none();
                     }
                 };
-                let total = options.frame_count(self.frame_count());
+                let total = options.frame_count(self.frame_count(), motion.as_deref());
                 if total == 0 {
                     self.status_message = Some(StatusMessage::error(
                         "Export failed: there are no frames to export.".to_string(),
@@ -121,6 +143,7 @@ impl Yui {
                     frames: Vec::new(),
                     bytes_kept: 0,
                     renderer: None,
+                    motion,
                     surface_ctx: None,
                 });
                 // デスクトップ版は、保存先のフォルダを選ぶ。ブラウザ版は、選ぶものがないので、そのまま始める
@@ -139,6 +162,28 @@ impl Yui {
             other => {
                 self.movie_options.apply(other);
                 Task::none()
+            }
+        }
+    }
+
+    /// 動きのファイルを選んだ。読めて、検査も通れば、Motion file を選んだ状態にする。誤りは、ダイアログに出す。
+    pub(super) fn handle_movie_motion_opened(
+        &mut self,
+        result: Result<Option<(String, String)>, String>,
+    ) {
+        match result {
+            Ok(Some((name, text))) => {
+                self.movie_motion = crate::movie_export::MotionState::from_text(name, &text);
+                if self.movie_motion.motion().is_some() {
+                    self.movie_options.source = MovieSource::Motion;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.movie_motion = crate::movie_export::MotionState::Failed {
+                    name: String::new(),
+                    error,
+                };
             }
         }
     }
@@ -280,7 +325,12 @@ impl Yui {
             Some(job.dir.clone()?.join(frame_file_name(k)))
         };
         let base = job.base_camera.clone();
-        let camera = camera_for_frame(&base, options.source, k, total);
+        let camera = match job.motion.as_deref() {
+            Some(motion) if options.source == MovieSource::Motion => {
+                crate::motion::camera_for_frame(&base, motion, k)
+            }
+            _ => camera_for_frame(&base, options.source, k, total),
+        };
         let mut surface_work = None;
         let surfaces = if options.source == MovieSource::Playback {
             self.show_frame(k);
@@ -580,6 +630,7 @@ mod tests {
             frames: Vec::new(),
             bytes_kept: 0,
             renderer: None,
+            motion: None,
             surface_ctx: None,
         }
     }
@@ -623,6 +674,101 @@ mod tests {
         let _ = app.update(Message::MovieFrameDone(Ok(None)));
         let _ = app.update(Message::MovieEncoded(Ok(None)));
         assert!(app.movie.is_none());
+    }
+
+    const MOTION_TEXT: &str = "schema: yui-motion/1\nfps: 10\nsteps:\n  - turn: {axis: y, angle: 360, seconds: 2}\n  - wait: 1\n";
+
+    #[test]
+    fn test_a_motion_file_sets_the_frames_and_the_frame_rate() {
+        use MovieDialogAction as A;
+        let mut app = app_with("1hls.pdb");
+        let _ = app.update(Message::MenuAction(MenuAction::FileExportAnimation));
+        // まだ選んでいないので、Motion file は選べない（設定を直接変えてあっても、開くときに Spin へ戻す）
+        app.movie_options.source = MovieSource::Motion;
+        app.movie_dialog = false;
+        let _ = app.update(Message::MenuAction(MenuAction::FileExportAnimation));
+        assert_eq!(app.movie_options.source, MovieSource::Spin);
+
+        // 選んだファイルが読めれば、Motion file を選んだ状態になる
+        let _ = app.update(Message::MovieMotionOpened(Ok(Some((
+            "turn.yaml".to_string(),
+            MOTION_TEXT.to_string(),
+        )))));
+        assert_eq!(app.movie_options.source, MovieSource::Motion);
+        assert!(app.movie_motion.motion().is_some());
+
+        let _ = app.update(Message::MovieDialog(A::Start));
+        let job = app.movie.as_ref().expect("a job waits for the folder");
+        assert_eq!(job.total, 30, "3 s at 10 fps");
+        assert_eq!(job.options.fps, 10, "the frame rate comes from the file");
+        assert!(job.motion.is_some());
+        // フォルダを選ぶ前は、描くものを作れない
+        assert!(app.movie_next_request().is_none(), "no folder yet");
+        // 1 枚目は、書き出しを始めたときの視点。動きの途中（Y 軸に 360° を 2 秒）では、視点が変わる
+        let mut j = job_for_motion(&app);
+        j.dir = Some(PathBuf::from("."));
+        let base = j.base_camera.clone();
+        app.movie = Some(j);
+        let first = app.movie_next_request().expect("frame 1");
+        assert_eq!(first.primitive.camera, base);
+        app.movie.as_mut().unwrap().next = 5;
+        let later = app.movie_next_request().expect("frame 6");
+        assert_ne!(later.primitive.camera, base);
+        // 動きのファイルの視点は、そのまま使う（Spin のように、フレームの数で割らない）
+        let motion = app.movie.as_ref().unwrap().motion.clone().unwrap();
+        assert_eq!(
+            later.primitive.camera,
+            crate::motion::camera_for_frame(&base, &motion, 5)
+        );
+        let _ = app.update(Message::MovieCancel);
+        assert!(app.movie.is_none());
+    }
+
+    fn job_for_motion(app: &Yui) -> MovieJob {
+        let source = app.movie.as_ref().expect("a job");
+        let mut j = job(app, MovieSource::Motion, source.total, PathBuf::from("."));
+        j.options.fps = source.options.fps;
+        j.motion = source.motion.clone();
+        j.dir = None;
+        j
+    }
+
+    #[test]
+    fn test_a_bad_motion_file_is_shown_and_does_not_start_an_export() {
+        use MovieDialogAction as A;
+        let mut app = app_with("1hls.pdb");
+        let _ = app.update(Message::MenuAction(MenuAction::FileExportAnimation));
+        let _ = app.update(Message::MovieMotionOpened(Ok(Some((
+            "bad.yaml".to_string(),
+            "schema: yui-motion/1\nfps: 10\nsteps: [{wait: -1}]".to_string(),
+        )))));
+        match &app.movie_motion {
+            crate::movie_export::MotionState::Failed { name, error } => {
+                assert_eq!(name, "bad.yaml");
+                assert!(error.contains("step 1"), "{error}");
+            }
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert_eq!(app.movie_options.source, MovieSource::Spin, "not selected");
+
+        // 読めなかったとき（文字コードなど）も、状態に残る
+        let _ = app.update(Message::MovieMotionOpened(Err("not UTF-8".to_string())));
+        assert!(matches!(
+            app.movie_motion,
+            crate::movie_export::MotionState::Failed { .. }
+        ));
+        // ファイルを選ぶのを取り消しても、状態は変わらない
+        let _ = app.update(Message::MovieMotionOpened(Ok(None)));
+        assert!(matches!(
+            app.movie_motion,
+            crate::movie_export::MotionState::Failed { .. }
+        ));
+
+        // 動きのファイルがないまま Motion で始めようとすると、書き出しは始まらない
+        app.movie_options.source = MovieSource::Motion;
+        let _ = app.update(Message::MovieDialog(A::Start));
+        assert!(app.movie.is_none());
+        assert!(!app.movie_dialog);
     }
 
     fn job_stub(app: &Yui) -> MovieJob {

@@ -1,7 +1,7 @@
 //! アニメーションを、連番の PNG（と、あれば ffmpeg で MP4）に書き出す（File → Export Animation...）。
 //!
 //! 動きのもとは、視点の回転（Spin: 1 周、Rock: 首振りの 1 周期）か、再生できるフレーム（マルチモデルの
-//! モデル、または XYZ の軌跡）。各フレームは、画面と同じ描画の準備（`Yui::offscreen_primitive`）を、
+//! モデル、または XYZ の軌跡）か、動きのファイル（`motion.rs`、architecture.md 8.13 節）。各フレームは、画面と同じ描画の準備（`Yui::offscreen_primitive`）を、
 //! 画面外に描いて PNG にする（`viewport::offscreen`）。このモジュールには、何枚目に何を描くかの計画、
 //! ダイアログ、1 枚の書き出し、ffmpeg の呼び出しがある。順に進める仕組みは `app/movie_ops.rs`。
 //! デスクトップ版は、フォルダに連番の PNG を書き（`ffmpeg` があれば MP4 も）、ブラウザ版は、フォルダにも
@@ -16,6 +16,7 @@ use iced::{Alignment, Element, Length};
 
 use crate::camera_anim::{ROCK_AMPLITUDE_DEG, ROCK_PERIOD_S, rock_offset_deg};
 use crate::canvas::{CanvasAction, CanvasOptions};
+use crate::motion::{Motion, parse_motion};
 use crate::viewport::camera::orbit_camera;
 use crate::viewport::offscreen::{OffscreenRenderer, downsample_box, encode_png};
 use crate::viewport::primitive::ViewportPrimitive;
@@ -30,6 +31,41 @@ pub enum MovieSource {
     Rock,
     /// 再生できるフレーム（モデル、軌跡）を、先頭から末尾まで 1 回
     Playback,
+    /// 動きのファイル（`motion.rs`）の手順を、上から順に 1 回。枚数と 1 秒あたりの枚数はファイルで決まる。
+    Motion,
+}
+
+/// 動きのファイルの、読み込みの結果（ダイアログの「Motion file」）
+#[derive(Debug, Clone, Default)]
+pub enum MotionState {
+    /// まだ選んでいない
+    #[default]
+    None,
+    /// 読めて、検査も通った
+    Loaded { name: String, motion: Arc<Motion> },
+    /// 読めなかった、または検査で誤りが見つかった。`name` は選んだファイル名（読む前の失敗では空）
+    Failed { name: String, error: String },
+}
+
+impl MotionState {
+    /// 読み込み済みの動き
+    pub fn motion(&self) -> Option<&Arc<Motion>> {
+        match self {
+            MotionState::Loaded { motion, .. } => Some(motion),
+            _ => None,
+        }
+    }
+
+    /// ファイルの中身の文字列から、状態を作る
+    pub fn from_text(name: String, text: &str) -> Self {
+        match parse_motion(text) {
+            Ok(motion) => MotionState::Loaded {
+                name,
+                motion: Arc::new(motion),
+            },
+            Err(error) => MotionState::Failed { name, error },
+        }
+    }
 }
 
 /// 幅の候補（ピクセル。動画のために偶数）
@@ -79,6 +115,8 @@ pub enum MovieDialogAction {
     SetWidth(u32),
     SetSmoothing(u32),
     SetMakeMp4(bool),
+    /// 動きのファイルを選ぶ（ダイアログは、開いたまま）
+    ChooseMotionFile,
     /// キャンバスの形と構図
     Canvas(CanvasAction),
     /// 保存先のフォルダを選んで、書き出す
@@ -103,10 +141,11 @@ impl MovieOptions {
         }
     }
 
-    /// 書き出すフレームの数。`playback_frames` は、再生できるフレームの数。
-    pub fn frame_count(&self, playback_frames: usize) -> usize {
+    /// 書き出すフレームの数。`playback_frames` は、再生できるフレームの数、`motion` は、読み込んだ動き。
+    pub fn frame_count(&self, playback_frames: usize, motion: Option<&Motion>) -> usize {
         match self.source {
             MovieSource::Playback => playback_frames,
+            MovieSource::Motion => motion.map_or(0, Motion::frame_count),
             MovieSource::Spin | MovieSource::Rock => (self.fps * self.seconds) as usize,
         }
     }
@@ -128,7 +167,8 @@ pub fn camera_for_frame(
             let yaw = rock_offset_deg(t * ROCK_PERIOD_S, ROCK_AMPLITUDE_DEG, ROCK_PERIOD_S);
             orbit_camera(&mut cam, yaw.to_radians(), 0.0);
         }
-        MovieSource::Playback => {}
+        // Playback は視点を変えない。Motion は、`motion::camera_for_frame` が決める（呼び出し側が分ける）。
+        MovieSource::Playback | MovieSource::Motion => {}
     }
     cam
 }
@@ -299,6 +339,22 @@ pub async fn choose_folder() -> Result<Option<PathBuf>, String> {
         .map(|h| h.path().to_path_buf()))
 }
 
+/// 動きのファイルを選ぶダイアログ。ファイル名と中身の文字列を返す（キャンセルは `None`）。
+pub async fn open_motion_dialog() -> Result<Option<(String, String)>, String> {
+    let Some(handle) = rfd::AsyncFileDialog::new()
+        .set_title("Choose a motion file")
+        .add_filter("motion file (YAML)", &["yaml", "yml"])
+        .pick_file()
+        .await
+    else {
+        return Ok(None);
+    };
+    let name = handle.file_name();
+    let bytes = handle.read().await;
+    let text = String::from_utf8(bytes).map_err(|e| format!("'{name}' is not UTF-8 text: {e}"))?;
+    Ok(Some((name, text)))
+}
+
 /// 溜めた PNG の zip を、ブラウザにダウンロードさせる。戻りは、ファイル名（取り消しなら `None`）。
 #[cfg(target_arch = "wasm32")]
 pub async fn save_zip(zip: Vec<u8>, file_name: String) -> Result<Option<String>, String> {
@@ -327,10 +383,12 @@ pub fn zip_file_name(version: &str) -> String {
     format!("yui-animation-{version}.zip")
 }
 
-/// 書き出しのダイアログ。`playback_frames` が 2 未満なら、Playback は選べない。
+/// 書き出しのダイアログ。`playback_frames` が 2 未満なら、Playback は選べない。動きのファイルを読み込むまで、
+/// Motion file は選べない。
 pub fn view_movie_dialog<'a, Message: Clone + 'a>(
     options: MovieOptions,
     playback_frames: usize,
+    motion: &MotionState,
     on_action: impl Fn(MovieDialogAction) -> Message + Copy + 'a,
 ) -> Element<'a, Message> {
     let chip = |label: String, selected: bool, action: Option<MovieDialogAction>| {
@@ -362,10 +420,43 @@ pub fn view_movie_dialog<'a, Message: Clone + 'a>(
             options.source == MovieSource::Playback,
             can_play.then_some(MovieDialogAction::SetSource(MovieSource::Playback))
         ),
+        chip(
+            "Motion file".to_string(),
+            options.source == MovieSource::Motion,
+            motion
+                .motion()
+                .is_some()
+                .then_some(MovieDialogAction::SetSource(MovieSource::Motion))
+        ),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
 
+    // 動きのファイルを選ぶ行と、読み込みの結果
+    let motion_note = match motion {
+        MotionState::None => "No file chosen.".to_string(),
+        MotionState::Loaded { name, motion } => format!(
+            "{name}: {} frames, {:.1} s at {} fps",
+            motion.frame_count(),
+            motion.total_seconds(),
+            motion.fps
+        ),
+        MotionState::Failed { name, error } if name.is_empty() => format!("Error: {error}"),
+        MotionState::Failed { name, error } => format!("{name}: {error}"),
+    };
+    let motion_file = row![
+        label("File"),
+        button(text("Choose file...").size(12))
+            .padding([3, 10])
+            .style(crate::ui_style::secondary_button)
+            .on_press(on_action(MovieDialogAction::ChooseMotionFile)),
+        text(motion_note).size(11),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    // 動きのファイルでは、1 秒あたりの枚数と長さはファイルが決める
+    let from_file = options.source == MovieSource::Motion;
     let mut fps = row![label("Frame rate")]
         .spacing(6)
         .align_y(Alignment::Center);
@@ -373,7 +464,7 @@ pub fn view_movie_dialog<'a, Message: Clone + 'a>(
         fps = fps.push(chip(
             format!("{v} fps"),
             options.fps == v,
-            Some(MovieDialogAction::SetFps(v)),
+            (!from_file).then_some(MovieDialogAction::SetFps(v)),
         ));
     }
     let mut seconds = row![label("Length")].spacing(6).align_y(Alignment::Center);
@@ -381,7 +472,8 @@ pub fn view_movie_dialog<'a, Message: Clone + 'a>(
         seconds = seconds.push(chip(
             format!("{v} s"),
             options.seconds == v,
-            (options.source != MovieSource::Playback).then_some(MovieDialogAction::SetSeconds(v)),
+            (options.source != MovieSource::Playback && !from_file)
+                .then_some(MovieDialogAction::SetSeconds(v)),
         ));
     }
     let canvas_rows =
@@ -426,8 +518,15 @@ pub fn view_movie_dialog<'a, Message: Clone + 'a>(
     .spacing(6)
     .align_y(Alignment::Center);
 
-    let frames = options.frame_count(playback_frames);
-    let mut body = column![text("Export Animation").size(14), source, fps, seconds].spacing(10);
+    let frames = options.frame_count(playback_frames, motion.motion().map(|m| m.as_ref()));
+    let mut body = column![
+        text("Export Animation").size(14),
+        source,
+        motion_file,
+        fps,
+        seconds
+    ]
+    .spacing(10);
     for r in canvas_rows {
         body = body.push(r);
     }
@@ -497,12 +596,19 @@ mod tests {
     #[test]
     fn test_frame_counts() {
         let o = MovieOptions::default();
-        assert_eq!(o.frame_count(20), 24 * 8, "Spin: fps x seconds");
+        assert_eq!(o.frame_count(20, None), 24 * 8, "Spin: fps x seconds");
         let p = MovieOptions {
             source: MovieSource::Playback,
             ..o
         };
-        assert_eq!(p.frame_count(20), 20, "Playback: one per frame");
+        assert_eq!(p.frame_count(20, None), 20, "Playback: one per frame");
+        let m = parse_motion("schema: yui-motion/1\nfps: 10\nsteps: [{wait: 3}]").unwrap();
+        let f = MovieOptions {
+            source: MovieSource::Motion,
+            ..o
+        };
+        assert_eq!(f.frame_count(20, Some(&m)), 30, "Motion: set by the file");
+        assert_eq!(f.frame_count(20, None), 0, "Motion without a file: none");
     }
 
     #[test]
@@ -577,7 +683,28 @@ mod tests {
         o.apply(MovieDialogAction::Start);
         o.apply(MovieDialogAction::Cancel);
         assert_eq!(o, before);
-        let _: Element<'_, MovieDialogAction> = view_movie_dialog(o, 20, |a| a);
-        let _: Element<'_, MovieDialogAction> = view_movie_dialog(o, 1, |a| a);
+        let none = MotionState::None;
+        let _: Element<'_, MovieDialogAction> = view_movie_dialog(o, 20, &none, |a| a);
+        let _: Element<'_, MovieDialogAction> = view_movie_dialog(o, 1, &none, |a| a);
+        let good = MotionState::from_text(
+            "turn.yaml".to_string(),
+            "schema: yui-motion/1\nfps: 10\nsteps: [{wait: 1}]",
+        );
+        let bad = MotionState::from_text("bad.yaml".to_string(), "schema: nope");
+        assert!(good.motion().is_some() && bad.motion().is_none());
+        let motion_o = MovieOptions {
+            source: MovieSource::Motion,
+            ..o
+        };
+        for state in [
+            &good,
+            &bad,
+            &MotionState::Failed {
+                name: String::new(),
+                error: "x".into(),
+            },
+        ] {
+            let _: Element<'_, MovieDialogAction> = view_movie_dialog(motion_o, 1, state, |a| a);
+        }
     }
 }

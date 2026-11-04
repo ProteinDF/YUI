@@ -265,6 +265,8 @@ pub enum Message {
     Share(crate::share_dialog::ShareAction),
     /// アニメーションの書き出し（ネイティブ版のみ）
     MovieDialog(crate::movie_export::MovieDialogAction),
+    /// 動きのファイルを選んだ（ファイル名と中身。キャンセルは `None`）
+    MovieMotionOpened(Result<Option<(String, String)>, String>),
     #[cfg(not(target_arch = "wasm32"))]
     MovieFolderChosen(Result<Option<std::path::PathBuf>, String>),
     MovieRendererReady(Result<crate::movie_export::SharedRenderer, String>),

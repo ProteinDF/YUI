@@ -179,6 +179,8 @@ pub struct Yui {
     /// アニメーションの書き出しのダイアログと、前回の設定、進行中の書き出し（ネイティブ版のみ）
     pub(super) movie_dialog: bool,
     pub(super) movie_options: crate::movie_export::MovieOptions,
+    /// ダイアログで選んだ動きのファイル（architecture.md 8.13 節）。保存しない
+    pub(super) movie_motion: crate::movie_export::MotionState,
     pub(super) movie: Option<movie_ops::MovieJob>,
     pub(super) png_options: crate::png_export::PngOptions,
 
@@ -339,6 +341,7 @@ impl Default for Yui {
             svg_options: crate::svg_export::SvgOptions::default(),
             movie_dialog: false,
             movie_options: crate::movie_export::MovieOptions::default(),
+            movie_motion: crate::movie_export::MotionState::None,
             movie: None,
             png_options: crate::png_export::PngOptions::default(),
             resolved_interactions,
@@ -1936,6 +1939,7 @@ impl Yui {
             layers.push(dim_modal(crate::movie_export::view_movie_dialog(
                 self.movie_options,
                 self.frame_count(),
+                &self.movie_motion,
                 Message::MovieDialog,
             )));
         }

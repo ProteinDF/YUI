@@ -391,6 +391,9 @@ impl Yui {
             Message::MovieDialog(action) => {
                 task = self.handle_movie_dialog(action);
             }
+            Message::MovieMotionOpened(result) => {
+                self.handle_movie_motion_opened(result);
+            }
             #[cfg(not(target_arch = "wasm32"))]
             Message::MovieFolderChosen(result) => {
                 task = self.handle_movie_folder_chosen(result);
