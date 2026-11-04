@@ -18,6 +18,7 @@
 - アプリの名前を、タイトルとバージョン情報では「YUI」にした。ウィンドウのタイトル、About ダイアログとそのメニュー項目、Web ページのタイトルとバッジ、backend のコンソールの表示、インストーラーの説明、README・ROADMAP・architecture・TESTING の見出しから「結」の字をなくした。ドキュメント本文の「結 (YUI)」の表記は変えていない。
 
 ### 追加
+- File →「Export Animation...」に、新しい動き「Motion file」を足した。YAML のファイル（`schema: yui-motion/1`、`fps`、`steps`）に、カメラの手順を上から順に書く: `turn`（`axis`: 画面の `x` / `y` / `z`、または任意のベクトル `[x, y, z]`。`angle`: 度で、軸の先から見て反時計回りが正。`seconds`）、`zoom`（`factor`、`seconds`）、`wait`（秒数）。同じファイルからは、いつも同じ動画ができる。ダイアログの「Choose file...」で、ファイル全体をすぐに読んで検査し、最初の誤りを出す（例: `step 2: seconds must be a positive number`）。枚数と 1 秒あたりの枚数はファイルで決まる。例: `steps: [{turn: {axis: y, angle: 360, seconds: 6}}, {wait: 1}, {zoom: {factor: 1.5, seconds: 2}}]`。まだ：モデルや軌跡のフレーム送り、動画の途中での表現の変更、画面での再生。
 - File →「Open Plot (pytools)...」（以前は「Open Plot (pytools JSON)...」）が、YAML のグラフを読めるようにした（`.yaml`、`.yml`）。データは同じ `pdf-plot/1` の構造なので、手書きや手直しができる。JSON（`.json`）は、`ProteinDF_pytools` が YAML を書けるようになるまでの移行措置としてだけ読み、いずれ外す。自動テストで確かめた（同じデータを YAML と JSON で、および `No` という元素）。`ProteinDF_pytools` が書いたファイルでは未確認（pytools が書けるのは、今のところ `--json` の出力だけ）。
 - `develop` への push のたび（`*.md` だけの変更を除く）に、Linux・macOS・Windows のインストーラーを作り、`dev-<日付>-<コミット>` という GitHub のプレリリースとして公開するようにした。残す開発版は新しい 10 個だけで、古いものはタグごと削除される（`main` からのリリースは削除されない）。開発版は不安定で、署名もない。未確認: ワークフローはまだ動かしていない。削除は、見本のデータで試しただけ。
 - CalVer のタグ（例: `2026.10.11`。`Cargo.toml` のバージョンと同じにする）を push すると、Linux・macOS・Windows のインストーラーを作り、添付した GitHub リリースを下書きで作るようにした。人が確かめて公開する。手動実行は、これまでどおり artifacts だけ。macOS のビルドは `macos-15` のランナーに移した。手動実行では 3 つのインストーラーがすべてできた。下書きリリースと、macOS・Windows のインストーラーのインストールは未確認。
