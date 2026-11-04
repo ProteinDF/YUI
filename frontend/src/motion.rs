@@ -37,6 +37,13 @@ pub enum Step {
     Zoom { factor: f32, seconds: f32 },
     /// 何もしないで、待つ（秒）
     Wait(f32),
+    /// マルチモデル構造のモデル、または XYZ の軌跡のフレームを、`from` から `to` まで（1 始まり、両端を含む。
+    /// `from` が `to` より大きければ逆戻り）、`seconds` かけて進める。
+    ShowFrame {
+        from: usize,
+        to: usize,
+        seconds: f32,
+    },
 }
 
 #[derive(Deserialize)]
@@ -51,6 +58,14 @@ struct TurnBody {
 #[serde(deny_unknown_fields)]
 struct ZoomBody {
     factor: f32,
+    seconds: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShowFrameBody {
+    from: usize,
+    to: usize,
     seconds: f32,
 }
 
@@ -81,6 +96,14 @@ impl<'de> Deserialize<'de> for Step {
                     seconds: z.seconds,
                 })
             }
+            Some("show_frame") => {
+                let s: ShowFrameBody = serde_yaml::from_value(body).map_err(conv)?;
+                Ok(Step::ShowFrame {
+                    from: s.from,
+                    to: s.to,
+                    seconds: s.seconds,
+                })
+            }
             Some("wait") => Ok(Step::Wait(serde_yaml::from_value(body).map_err(conv)?)),
             other => Err(D::Error::custom(format!("unknown step {other:?}"))),
         }
@@ -99,7 +122,9 @@ impl Step {
     /// この手順の長さ（秒）
     pub fn seconds(&self) -> f32 {
         match self {
-            Step::Turn { seconds, .. } | Step::Zoom { seconds, .. } => *seconds,
+            Step::Turn { seconds, .. }
+            | Step::Zoom { seconds, .. }
+            | Step::ShowFrame { seconds, .. } => *seconds,
             Step::Wait(seconds) => *seconds,
         }
     }
@@ -109,6 +134,26 @@ impl Motion {
     /// 動き全体の長さ（秒）
     pub fn total_seconds(&self) -> f32 {
         self.steps.iter().map(Step::seconds).sum()
+    }
+
+    /// モデルや軌跡のフレームを進める手順があるか
+    pub fn uses_frames(&self) -> bool {
+        self.steps
+            .iter()
+            .any(|s| matches!(s, Step::ShowFrame { .. }))
+    }
+
+    /// 手順が指す、いちばん大きいフレームの番号（1 始まり）。フレームを進める手順がなければ 0。
+    /// 構造のフレームの数がこれ以上あるかは、書き出しを始める前に、呼び出し側が確かめる。
+    pub fn max_frame(&self) -> usize {
+        self.steps
+            .iter()
+            .filter_map(|s| match s {
+                Step::ShowFrame { from, to, .. } => Some(*from.max(to)),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     /// 書き出すフレームの数（`fps` × 全体の長さ、四捨五入。1 以上）
@@ -162,6 +207,11 @@ fn validate(motion: &Motion) -> Result<(), String> {
                     return Err(format!("step {n}: factor must be a positive number"));
                 }
             }
+            Step::ShowFrame { from, to, .. } => {
+                if *from == 0 || *to == 0 {
+                    return Err(format!("step {n}: frame numbers start at 1"));
+                }
+            }
             Step::Wait(_) => {}
         }
     }
@@ -204,7 +254,8 @@ fn apply_step(cam: &mut CameraState, step: &Step, p: f32) {
             }
         }
         Step::Zoom { factor, .. } => zoom_camera(cam, factor.powf(p)),
-        Step::Wait(_) => {}
+        // フレームを進める手順は、視点を変えない（`frame_at` が決める）
+        Step::Wait(_) | Step::ShowFrame { .. } => {}
     }
 }
 
@@ -226,6 +277,36 @@ pub fn camera_at(base: &CameraState, motion: &Motion, time_s: f32) -> CameraStat
         return cam;
     }
     cam
+}
+
+/// 時刻 `time_s` に表示するモデル（軌跡のフレーム）の番号（0 始まり）。フレームを進める手順がまだ
+/// 始まっていなければ `None`（今の表示のまま）。手順が終わったあとは、その最後のフレームのまま。
+pub fn frame_at(motion: &Motion, time_s: f32) -> Option<usize> {
+    let t = time_s.max(0.0);
+    let mut start = 0.0_f32;
+    let mut shown = None;
+    for step in &motion.steps {
+        let len = step.seconds();
+        if let Step::ShowFrame { from, to, .. } = step {
+            if t >= start + len {
+                shown = Some(to - 1);
+            } else if t >= start {
+                let p = ((t - start) / len).clamp(0.0, 1.0);
+                let i = *from as f32 + (*to as f32 - *from as f32) * p;
+                return Some(i.round().max(1.0) as usize - 1);
+            }
+        }
+        if t < start + len {
+            return shown;
+        }
+        start += len;
+    }
+    shown
+}
+
+/// `k` 枚目（0 始まり）のフレームで表示するモデル（軌跡のフレーム）の番号。時刻は `k / fps` 秒。
+pub fn frame_for_frame(motion: &Motion, k: usize) -> Option<usize> {
+    frame_at(motion, k as f32 / motion.fps as f32)
 }
 
 /// `k` 枚目（0 始まり）のフレームのカメラ。時刻は `k / fps` 秒。
@@ -267,6 +348,62 @@ steps:
         let m = parse_motion(text).expect("turn-around.yaml");
         assert_eq!(m.fps, 30);
         assert_eq!(m.frame_count(), 360, "12 s at 30 fps");
+    }
+
+    fn frames_motion() -> Motion {
+        parse_motion(
+            "schema: yui-motion/1\nfps: 10\nsteps:\n  - wait: 1\n  - show_frame: {from: 1, to: 5, seconds: 4}\n  - wait: 1\n  - show_frame: {from: 5, to: 1, seconds: 4}\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn show_frame_steps_pick_the_model_at_each_time() {
+        let m = frames_motion();
+        assert!(m.uses_frames());
+        assert_eq!(m.max_frame(), 5);
+        // 始まる前は、今の表示のまま
+        assert_eq!(frame_at(&m, 0.0), None);
+        assert_eq!(frame_at(&m, 0.99), None);
+        // 1 → 5 を 4 秒で。始まりは 1 番（添字 0）、等間隔で進む
+        assert_eq!(frame_at(&m, 1.0), Some(0));
+        assert_eq!(frame_at(&m, 2.0), Some(1));
+        assert_eq!(frame_at(&m, 3.0), Some(2));
+        assert_eq!(frame_at(&m, 4.0), Some(3));
+        assert_eq!(frame_at(&m, 4.99), Some(4));
+        // 待っている間は、最後のフレームのまま
+        assert_eq!(frame_at(&m, 5.5), Some(4));
+        // 5 → 1 の逆戻り
+        assert_eq!(frame_at(&m, 6.0), Some(4));
+        assert_eq!(frame_at(&m, 8.0), Some(2));
+        assert_eq!(frame_at(&m, 9.99), Some(0));
+        // 終わったあとは、最後のフレームのまま
+        assert_eq!(frame_at(&m, 99.0), Some(0));
+        assert_eq!(frame_for_frame(&m, 20), Some(1));
+    }
+
+    #[test]
+    fn show_frame_does_not_move_the_camera() {
+        let m = frames_motion();
+        assert_eq!(camera_at(&base(), &m, 3.0), base());
+        assert!(!parse_motion(SAMPLE).unwrap().uses_frames());
+        assert_eq!(parse_motion(SAMPLE).unwrap().max_frame(), 0);
+        assert_eq!(frame_at(&parse_motion(SAMPLE).unwrap(), 3.0), None);
+    }
+
+    #[test]
+    fn show_frame_rejects_bad_numbers() {
+        for (body, expect) in [
+            ("{from: 0, to: 3, seconds: 1}", "start at 1"),
+            ("{from: 1, to: 0, seconds: 1}", "start at 1"),
+            ("{from: 1, to: 3, seconds: 0}", "seconds"),
+            ("{from: -1, to: 3, seconds: 1}", "not a motion file"),
+            ("{from: 1, seconds: 1}", "not a motion file"),
+        ] {
+            let text = format!("schema: yui-motion/1\nfps: 10\nsteps: [{{show_frame: {body}}}]");
+            let err = parse_motion(&text).expect_err(&text);
+            assert!(err.contains(expect), "{text:?} -> {err:?}");
+        }
     }
 
     #[test]
