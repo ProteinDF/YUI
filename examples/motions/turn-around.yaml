@@ -1,0 +1,17 @@
+# A scripted camera motion for File -> Export Animation... -> "Motion file".
+# The steps run from top to bottom, and the same file always makes the same movie.
+schema: yui-motion/1
+fps: 30                     # frames per second (1 to 120)
+steps:
+  # Turn the molecule once around the vertical axis of the screen.
+  # axis: x / y / z are the screen's right / up / toward-you axes, or any vector such as [1, 1, 0].
+  # angle: degrees; counter-clockwise looking from the tip of the axis is positive.
+  - turn: {axis: y, angle: 360, seconds: 6}
+  # Stay still for a moment.
+  - wait: 1
+  # Move in. factor multiplies the distance from the camera to the target:
+  # 0.6 comes closer, 1.5 goes away.
+  - zoom: {factor: 0.6, seconds: 2}
+  # Tilt the molecule forward by 90 degrees around the horizontal axis of the screen.
+  - turn: {axis: x, angle: 90, seconds: 2}
+  - wait: 1

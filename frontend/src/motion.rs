@@ -260,6 +260,15 @@ steps:
         (0..3).all(|k| (a[k] - b[k]).abs() < 1e-3)
     }
 
+    /// `examples/motions/` のサンプルが、いつでも読めること
+    #[test]
+    fn the_example_motion_files_are_valid() {
+        let text = include_str!("../../examples/motions/turn-around.yaml");
+        let m = parse_motion(text).expect("turn-around.yaml");
+        assert_eq!(m.fps, 30);
+        assert_eq!(m.frame_count(), 360, "12 s at 30 fps");
+    }
+
     #[test]
     fn parses_the_sample_and_counts_frames() {
         let m = parse_motion(SAMPLE).unwrap();

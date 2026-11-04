@@ -20,4 +20,6 @@ All five files are unmodified downloads from the [RCSB Protein Data Bank](https:
 4. `1bl8.pdb`: the pore and the ions.
 5. Open the Ramachandran Plot (View menu) for any of them, and click a point to select the residue in the 3D view.
 
+For a movie, File → "Export Animation..." with a motion file from [`../motions/`](../motions/) makes the same camera motion every time.
+
 "Atoms loaded" is the number YUI reads; it can be smaller than the number of lines in the file because alternate locations are not read.
