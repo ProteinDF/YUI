@@ -46,6 +46,14 @@ pub(crate) struct MovieJob {
     pub surface_ctx: Option<std::sync::Arc<crate::surface_render::SurfaceColorContext>>,
 }
 
+impl MovieJob {
+    /// モデルや軌跡のフレームを進めながら描く書き出しか（再生のフレーム、またはフレームを進める動き）
+    fn uses_frames(&self) -> bool {
+        self.options.source == MovieSource::Playback
+            || self.motion.as_ref().is_some_and(|m| m.uses_frames())
+    }
+}
+
 /// 1 枚ぶんの依頼（描くものの準備ができたもの）
 pub(crate) struct FrameRequest {
     pub primitive: crate::viewport::primitive::ViewportPrimitive,
@@ -105,6 +113,14 @@ impl Yui {
                         ));
                         return Task::none();
                     };
+                    let frames = self.frame_count();
+                    if m.max_frame() > frames {
+                        self.status_message = Some(StatusMessage::error(format!(
+                            "Export failed: the motion shows frame {}, but this structure has {frames}.",
+                            m.max_frame()
+                        )));
+                        return Task::none();
+                    }
                     options.fps = m.fps;
                     Some(m)
                 } else {
@@ -215,8 +231,8 @@ impl Yui {
         let Some(job) = self.movie.as_mut() else {
             return Task::none();
         };
-        // 再生のフレームを書き出すときは、再生を止め、終わったら今のフレームに戻す
-        if job.options.source == MovieSource::Playback {
+        // フレームを進めながら書き出すときは、再生を止め、終わったら今のフレームに戻す
+        if job.uses_frames() {
             let restore = self.current_frame();
             self.reset_playback();
             // 分子表面の表現があれば、フレームごとに作り直す（色の情報は、フレームが変わっても同じ）
@@ -324,7 +340,15 @@ impl Yui {
         } else {
             Some(job.dir.clone()?.join(frame_file_name(k)))
         };
+        let uses_frames = job.uses_frames();
         let base = job.base_camera.clone();
+        let shown_frame = match job.motion.as_deref() {
+            Some(motion) if options.source == MovieSource::Motion => {
+                crate::motion::frame_for_frame(motion, k)
+            }
+            _ if options.source == MovieSource::Playback => Some(k),
+            _ => None,
+        };
         let camera = match job.motion.as_deref() {
             Some(motion) if options.source == MovieSource::Motion => {
                 crate::motion::camera_for_frame(&base, motion, k)
@@ -332,8 +356,10 @@ impl Yui {
             _ => camera_for_frame(&base, options.source, k, total),
         };
         let mut surface_work = None;
-        let surfaces = if options.source == MovieSource::Playback {
-            self.show_frame(k);
+        let surfaces = if uses_frames {
+            if let Some(frame) = shown_frame {
+                self.show_frame(frame);
+            }
             // 分子表面は、そのフレームの原子で、描く直前に作る（`render_frame_to_file`）。ここでは CUBE の面だけ。
             if let Some(ctx) = self.movie.as_ref().and_then(|j| j.surface_ctx.clone()) {
                 let requests = self.surface_build_requests();
@@ -545,11 +571,10 @@ impl Yui {
 
     /// 再生のフレームの書き出しで動かした表示を、元のフレームに戻す
     fn restore_after_movie(&mut self) {
-        let restore = self.movie.as_ref().and_then(|j| {
-            (j.options.source == MovieSource::Playback)
-                .then_some(j.restore_frame)
-                .flatten()
-        });
+        let restore = self
+            .movie
+            .as_ref()
+            .and_then(|j| j.uses_frames().then_some(j.restore_frame).flatten());
         if let Some(frame) = restore {
             self.show_frame(frame);
         }
@@ -769,6 +794,66 @@ mod tests {
         let _ = app.update(Message::MovieDialog(A::Start));
         assert!(app.movie.is_none());
         assert!(!app.movie_dialog);
+    }
+
+    fn load_motion(app: &mut Yui, text: &str) {
+        let _ = app.update(Message::MovieMotionOpened(Ok(Some((
+            "m.yaml".to_string(),
+            text.to_string(),
+        )))));
+        assert!(
+            app.movie_motion.motion().is_some(),
+            "{:?}",
+            app.movie_motion
+        );
+    }
+
+    #[test]
+    fn test_a_motion_steps_through_the_models_and_the_view_is_restored() {
+        use MovieDialogAction as A;
+        let mut app = app_with("1HLS.cif");
+        assert!(app.frame_count() >= 3);
+        let before = app.state.active_model.clone();
+        assert_eq!(before.as_deref(), Some("model_1"));
+        // 2 fps で 2 秒 = 4 枚。時刻 0, 0.5, 1, 1.5 秒で、モデル 1, 2, 2, 3
+        load_motion(
+            &mut app,
+            "schema: yui-motion/1\nfps: 2\nsteps: [{show_frame: {from: 1, to: 3, seconds: 2}}]",
+        );
+        let _ = app.update(Message::MenuAction(MenuAction::FileExportAnimation));
+        let _ = app.update(Message::MovieDialog(A::Start));
+        let job = app.movie.as_ref().expect("a job waits for the folder");
+        assert_eq!(job.total, 4);
+        assert!(job.uses_frames());
+        app.movie.as_mut().unwrap().dir = Some(PathBuf::from("."));
+        app.movie.as_mut().unwrap().restore_frame = app.current_frame();
+        let mut seen = Vec::new();
+        for k in 0..4 {
+            app.movie.as_mut().unwrap().next = k;
+            let _ = app.movie_next_request().expect("a request");
+            seen.push(app.state.active_model.clone());
+        }
+        let model = |n: usize| Some(format!("model_{n}"));
+        assert_eq!(seen, vec![model(1), model(2), model(2), model(3)]);
+        // 取り消すと、書き出しの前のフレームに戻る
+        let _ = app.update(Message::MovieCancel);
+        assert_eq!(app.state.active_model, before);
+    }
+
+    #[test]
+    fn test_a_motion_that_shows_a_frame_the_structure_lacks_does_not_start() {
+        use MovieDialogAction as A;
+        let mut app = app_with("1hls.pdb");
+        assert_eq!(app.frame_count(), 1);
+        load_motion(
+            &mut app,
+            "schema: yui-motion/1\nfps: 10\nsteps: [{show_frame: {from: 1, to: 3, seconds: 1}}]",
+        );
+        let _ = app.update(Message::MenuAction(MenuAction::FileExportAnimation));
+        let _ = app.update(Message::MovieDialog(A::Start));
+        assert!(app.movie.is_none());
+        let msg = app.status_message.as_ref().expect("a message").text.clone();
+        assert!(msg.contains("frame 3") && msg.contains("has 1"), "{msg}");
     }
 
     fn job_stub(app: &Yui) -> MovieJob {

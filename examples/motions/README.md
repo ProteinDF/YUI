@@ -18,10 +18,13 @@ YAML. `schema: yui-motion/1`, `fps` (1 to 120) and `steps`, which run from top t
 | `turn` | `axis`, `angle`, `seconds` | Turn the molecule about an axis through the target. `axis` is `x`, `y` or `z` (the screen's right, up and toward-you axes) or any vector `[x, y, z]`. `angle` is in degrees; counter-clockwise looking from the tip of the axis is positive. |
 | `zoom` | `factor`, `seconds` | Multiply the distance from the camera to the target by `factor`: under 1 comes closer, over 1 goes away. |
 | `wait` | seconds | Stay still. |
+| `show_frame` | `from`, `to`, `seconds` | Step through the models of a multi-model structure, or the frames of an XYZ trajectory, from frame `from` to frame `to` (numbered from 1, both ends included; going backwards if `from` is larger). The last frame stays after the step. The export stops with an error, before the first frame, if the structure has fewer frames. |
 
 Each step moves at a constant speed, and the next step starts where the last one ended.
 
-Not yet: stepping through the models or the frames of a trajectory, and changing representations during the movie.
+Steps run one after another, so a frame step and a camera step do not move at the same time: for example, step through the models first (`- show_frame: {from: 1, to: 20, seconds: 4}`), then turn.
+
+Not yet: changing representations during the movie.
 
 ## Files
 
