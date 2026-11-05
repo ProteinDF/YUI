@@ -42,6 +42,8 @@ pub(crate) struct MovieJob {
     pub renderer: Option<SharedRenderer>,
     /// 動きのファイルの書き出しで、読み込んだ動き（`options.source` が `Motion` のとき）
     pub motion: Option<std::sync::Arc<crate::motion::Motion>>,
+    /// `set` の手順がある動きで、書き出しを始める前の表現（終わったら、これに戻す）
+    pub base_reps: Option<Vec<yui_core::representation::Representation>>,
     /// 再生のフレームの書き出しで、分子表面の表現があるときの、頂点の色の情報
     pub surface_ctx: Option<std::sync::Arc<crate::surface_render::SurfaceColorContext>>,
 }
@@ -121,6 +123,12 @@ impl Yui {
                         )));
                         return Task::none();
                     }
+                    // `set` が指す表現が、ワークスペースにあるか
+                    if let Err(e) = crate::motion::check_sets(&m, &self.state.representations) {
+                        self.status_message =
+                            Some(StatusMessage::error(format!("Export failed: {e}")));
+                        return Task::none();
+                    }
                     options.fps = m.fps;
                     Some(m)
                 } else {
@@ -147,6 +155,10 @@ impl Yui {
                     ));
                     return Task::none();
                 }
+                let base_reps = motion
+                    .as_deref()
+                    .is_some_and(|m| m.uses_set())
+                    .then(|| self.state.representations.clone());
                 self.movie = Some(MovieJob {
                     options,
                     total,
@@ -160,6 +172,7 @@ impl Yui {
                     bytes_kept: 0,
                     renderer: None,
                     motion,
+                    base_reps,
                     surface_ctx: None,
                 });
                 // デスクトップ版は、保存先のフォルダを選ぶ。ブラウザ版は、選ぶものがないので、そのまま始める
@@ -355,6 +368,17 @@ impl Yui {
             }
             _ => camera_for_frame(&base, options.source, k, total),
         };
+        // `set` のある動きは、そのフレームの表現にして描く（もとの表現は、終わったら戻す）
+        let reps_now = match (job.motion.as_deref(), job.base_reps.as_deref()) {
+            (Some(motion), Some(base)) => {
+                Some(crate::motion::representations_for_frame(base, motion, k))
+            }
+            _ => None,
+        };
+        if let Some(reps) = reps_now {
+            self.state.representations = reps;
+        }
+        let set_in_use = self.movie.as_ref().is_some_and(|j| j.base_reps.is_some());
         let mut surface_work = None;
         let surfaces = if uses_frames {
             if let Some(frame) = shown_frame {
@@ -372,6 +396,9 @@ impl Yui {
                 }
             }
             crate::surface_render::SurfaceBatches::build_from_groups(&[&self.cube_entries])
+        } else if set_in_use {
+            // 作ってある分子表面の、表示と不透明度だけを、このフレームの表現に合わせる
+            self.surface_batches_for_representations()
         } else {
             self.surface_batches.clone()
         };
@@ -569,8 +596,38 @@ impl Yui {
         Task::none()
     }
 
+    /// 作ってある分子表面（と CUBE の面）を、今の表現の `visible` と `opacity` で描くバッチにする。
+    /// メッシュも色も作り直さず、頂点の透明度だけを置き換える（`set` のフェード用）。
+    fn surface_batches_for_representations(&self) -> crate::surface_render::SurfaceBatches {
+        let entries: Vec<crate::surface_render::SurfaceMeshEntry> = self
+            .surface_entries
+            .iter()
+            .map(|entry| {
+                let mut e = entry.clone();
+                if let Some(rep) = self
+                    .state
+                    .representations
+                    .iter()
+                    .find(|r| r.id == entry.rep_id)
+                {
+                    e.visible = rep.visible;
+                    e.opacity = rep.opacity;
+                    for v in &mut e.vertices {
+                        v.color[3] = rep.opacity;
+                    }
+                }
+                e
+            })
+            .collect();
+        crate::surface_render::SurfaceBatches::build_from_groups(&[&entries, &self.cube_entries])
+    }
+
     /// 再生のフレームの書き出しで動かした表示を、元のフレームに戻す
     fn restore_after_movie(&mut self) {
+        // `set` で変えた表現を、もとに戻す
+        if let Some(base) = self.movie.as_mut().and_then(|j| j.base_reps.take()) {
+            self.state.representations = base;
+        }
         let restore = self
             .movie
             .as_ref()
@@ -656,6 +713,7 @@ mod tests {
             bytes_kept: 0,
             renderer: None,
             motion: None,
+            base_reps: None,
             surface_ctx: None,
         }
     }
@@ -838,6 +896,108 @@ mod tests {
         // 取り消すと、書き出しの前のフレームに戻る
         let _ = app.update(Message::MovieCancel);
         assert_eq!(app.state.active_model, before);
+    }
+
+    #[test]
+    fn test_a_motion_changes_representations_and_they_are_put_back() {
+        use MovieDialogAction as A;
+        let mut app = app_with("1hls.pdb");
+        let original = app.state.representations.clone();
+        let visible = |app: &Yui, id: &str| {
+            app.state
+                .representations
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.visible)
+        };
+        // 2 fps で 2 秒 = 4 枚。時刻 0 で球棒を隠し、時刻 1 でカートゥーンを隠す
+        load_motion(
+            &mut app,
+            "schema: yui-motion/1\nfps: 2\nsteps:\n  - set: {id: ball_and_stick_default, visible: false}\n  - wait: 1\n  - set: {id: cartoon_default, visible: false}\n  - wait: 1",
+        );
+        let _ = app.update(Message::MenuAction(MenuAction::FileExportAnimation));
+        let _ = app.update(Message::MovieDialog(A::Start));
+        let job = app.movie.as_ref().expect("a job waits for the folder");
+        assert_eq!(job.total, 4);
+        assert!(job.base_reps.is_some());
+        app.movie.as_mut().unwrap().dir = Some(PathBuf::from("."));
+        let mut seen = Vec::new();
+        for k in 0..4 {
+            app.movie.as_mut().unwrap().next = k;
+            let _ = app.movie_next_request().expect("a request");
+            seen.push((
+                visible(&app, "ball_and_stick_default"),
+                visible(&app, "cartoon_default"),
+            ));
+        }
+        let (f, t) = (Some(false), Some(true));
+        assert_eq!(seen, vec![(f, t), (f, t), (f, f), (f, f)]);
+        // 取り消すと、書き出しの前の表現に戻る
+        let _ = app.update(Message::MovieCancel);
+        assert_eq!(app.state.representations, original);
+    }
+
+    #[test]
+    fn test_surface_batches_follow_the_visibility_and_opacity_of_the_representation() {
+        let mut app = app_with("1hls.pdb");
+        app.state
+            .representations
+            .push(yui_core::representation::Representation::new(
+                "surf",
+                yui_core::selector::Selector::All,
+                yui_core::representation::RepresentationKind::Surface,
+                yui_core::representation::ColorScheme::Chain,
+            ));
+        let results =
+            crate::surface_render::process_surface_build_requests(&app.surface_build_requests());
+        let generation = app.surface_generation_tracker.current_generation();
+        let _ = app.update(Message::SurfaceGenerated {
+            generation,
+            results,
+        });
+        let index = app.state.representations.len() - 1;
+        let set = |app: &mut Yui, visible: bool, opacity: f32| {
+            let r = &mut app.state.representations[index];
+            r.visible = visible;
+            r.opacity = opacity;
+            app.surface_batches_for_representations()
+        };
+        let solid = set(&mut app, true, 1.0);
+        assert!(!solid.opaque_vertices.is_empty() && solid.transparent_vertices.is_empty());
+        let faded = set(&mut app, true, 0.5);
+        assert!(faded.opaque_vertices.is_empty() && !faded.transparent_vertices.is_empty());
+        assert!(faded.transparent_vertices.iter().all(|v| v.color[3] == 0.5));
+        let gone = set(&mut app, false, 0.5);
+        assert!(gone.opaque_vertices.is_empty() && gone.transparent_vertices.is_empty());
+        // 元のバッチ（画面用）は変わらない
+        assert!(app.surface_entries.iter().all(|e| e.visible));
+    }
+
+    #[test]
+    fn test_a_motion_that_sets_a_missing_or_unsuitable_representation_does_not_start() {
+        use MovieDialogAction as A;
+        let mut app = app_with("1hls.pdb");
+        let cases = [
+            (
+                "{set: {id: nothing, visible: false}}",
+                "no representation with id",
+            ),
+            (
+                "{set: {id: cartoon_default, opacity: 0.5, seconds: 1}}",
+                "does not use opacity",
+            ),
+        ];
+        for (step, expect) in cases {
+            load_motion(
+                &mut app,
+                &format!("schema: yui-motion/1\nfps: 10\nsteps: [{step}]"),
+            );
+            let _ = app.update(Message::MenuAction(MenuAction::FileExportAnimation));
+            let _ = app.update(Message::MovieDialog(A::Start));
+            assert!(app.movie.is_none(), "{step}");
+            let msg = app.status_message.as_ref().expect("a message").text.clone();
+            assert!(msg.contains(expect) && msg.contains("step 1"), "{msg}");
+        }
     }
 
     #[test]
