@@ -19,12 +19,15 @@ YAML. `schema: yui-motion/1`, `fps` (1 to 120) and `steps`, which run from top t
 | `zoom` | `factor`, `seconds` | Multiply the distance from the camera to the target by `factor`: under 1 comes closer, over 1 goes away. |
 | `wait` | seconds | Stay still. |
 | `show_frame` | `from`, `to`, `seconds` | Step through the models of a multi-model structure, or the frames of an XYZ trajectory, from frame `from` to frame `to` (numbered from 1, both ends included; going backwards if `from` is larger). The last frame stays after the step. The export stops with an error, before the first frame, if the structure has fewer frames. |
+| `set` | `id`, `visible`, `opacity`, `seconds` | Change a representation of the workspace by its `id` (the `id` field of the representation, as saved in the workspace YAML). `visible` shows or hides it; `opacity` (0 to 1) sets how see-through it is. With `seconds` the opacity changes smoothly (a fade; a hidden representation fades in, a shown one fades out); without it the change is immediate and takes no time. Only Surface and Interaction representations use opacity: `opacity` on another kind, or an unknown `id`, stops the export before the first frame. The representations are put back when the export ends. |
 
 Each step moves at a constant speed, and the next step starts where the last one ended.
 
 Steps run one after another, so a frame step and a camera step do not move at the same time: for example, step through the models first (`- show_frame: {from: 1, to: 20, seconds: 4}`), then turn.
 
-Not yet: changing representations during the movie.
+A `set` step only changes representations that already exist in the workspace; it never creates one. For example, if the workspace has a surface representation with the id `surface_1`, this fades it in after a turn: `- turn: {axis: y, angle: 360, seconds: 6}` then `- set: {id: surface_1, visible: true, opacity: 0.6, seconds: 2}`.
+
+Not yet: playing a motion on the screen.
 
 ## Files
 

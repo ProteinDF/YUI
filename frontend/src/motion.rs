@@ -6,6 +6,7 @@
 
 use crate::viewport::camera::{TurnAxis, turn_camera, zoom_camera};
 use serde::Deserialize;
+use yui_core::representation::{Representation, RepresentationKind};
 use yui_core::state::CameraState;
 
 /// 対応する `schema` の値
@@ -44,6 +45,23 @@ pub enum Step {
         to: usize,
         seconds: f32,
     },
+    /// ワークスペースの表現（`id` で指す）の `visible` と `opacity` を変える。`seconds` があれば、
+    /// 不透明度をなめらかに変える（フェード）。なければ、すぐに変える（長さは 0）。
+    Set {
+        id: String,
+        visible: Option<bool>,
+        opacity: Option<f32>,
+        seconds: Option<f32>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetBody {
+    id: String,
+    visible: Option<bool>,
+    opacity: Option<f32>,
+    seconds: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +122,15 @@ impl<'de> Deserialize<'de> for Step {
                     seconds: s.seconds,
                 })
             }
+            Some("set") => {
+                let b: SetBody = serde_yaml::from_value(body).map_err(conv)?;
+                Ok(Step::Set {
+                    id: b.id,
+                    visible: b.visible,
+                    opacity: b.opacity,
+                    seconds: b.seconds,
+                })
+            }
             Some("wait") => Ok(Step::Wait(serde_yaml::from_value(body).map_err(conv)?)),
             other => Err(D::Error::custom(format!("unknown step {other:?}"))),
         }
@@ -126,6 +153,7 @@ impl Step {
             | Step::Zoom { seconds, .. }
             | Step::ShowFrame { seconds, .. } => *seconds,
             Step::Wait(seconds) => *seconds,
+            Step::Set { seconds, .. } => seconds.unwrap_or(0.0),
         }
     }
 }
@@ -141,6 +169,11 @@ impl Motion {
         self.steps
             .iter()
             .any(|s| matches!(s, Step::ShowFrame { .. }))
+    }
+
+    /// 表現を変える手順（`set`）があるか
+    pub fn uses_set(&self) -> bool {
+        self.steps.iter().any(|s| matches!(s, Step::Set { .. }))
     }
 
     /// 手順が指す、いちばん大きいフレームの番号（1 始まり）。フレームを進める手順がなければ 0。
@@ -192,7 +225,12 @@ fn validate(motion: &Motion) -> Result<(), String> {
     for (i, step) in motion.steps.iter().enumerate() {
         let n = i + 1;
         let seconds = step.seconds();
-        if !(seconds.is_finite() && seconds > 0.0) {
+        // `set` の秒数は省略できる（省略は 0 秒）。書いたときは、ほかの手順と同じく正の数
+        let seconds_ok = match step {
+            Step::Set { seconds: None, .. } => true,
+            _ => seconds.is_finite() && seconds > 0.0,
+        };
+        if !seconds_ok {
             return Err(format!("step {n}: seconds must be a positive number"));
         }
         match step {
@@ -210,6 +248,24 @@ fn validate(motion: &Motion) -> Result<(), String> {
             Step::ShowFrame { from, to, .. } => {
                 if *from == 0 || *to == 0 {
                     return Err(format!("step {n}: frame numbers start at 1"));
+                }
+            }
+            Step::Set {
+                id,
+                visible,
+                opacity,
+                ..
+            } => {
+                if id.is_empty() {
+                    return Err(format!("step {n}: id must not be empty"));
+                }
+                if visible.is_none() && opacity.is_none() {
+                    return Err(format!("step {n}: set needs visible or opacity"));
+                }
+                if let Some(o) = opacity
+                    && !(o.is_finite() && (0.0..=1.0).contains(o))
+                {
+                    return Err(format!("step {n}: opacity must be between 0 and 1"));
                 }
             }
             Step::Wait(_) => {}
@@ -255,7 +311,7 @@ fn apply_step(cam: &mut CameraState, step: &Step, p: f32) {
         }
         Step::Zoom { factor, .. } => zoom_camera(cam, factor.powf(p)),
         // フレームを進める手順は、視点を変えない（`frame_at` が決める）
-        Step::Wait(_) | Step::ShowFrame { .. } => {}
+        Step::Wait(_) | Step::ShowFrame { .. } | Step::Set { .. } => {}
     }
 }
 
@@ -312,6 +368,121 @@ pub fn frame_for_frame(motion: &Motion, k: usize) -> Option<usize> {
 /// `k` 枚目（0 始まり）のフレームのカメラ。時刻は `k / fps` 秒。
 pub fn camera_for_frame(base: &CameraState, motion: &Motion, k: usize) -> CameraState {
     camera_at(base, motion, k as f32 / motion.fps as f32)
+}
+
+/// 不透明度が見た目に効く表現の種類（分子表面と相互作用）。ほかの種類は、`visible` だけが効く。
+fn uses_opacity(kind: RepresentationKind) -> bool {
+    matches!(
+        kind,
+        RepresentationKind::Surface | RepresentationKind::Interaction
+    )
+}
+
+/// `set` が指す表現がワークスペースにあるか、不透明度の効かない種類に `opacity` を指していないかを
+/// 確かめる。動きのファイルだけでは分からないので、書き出しを始める前に、ワークスペースの表現で調べる。
+pub fn check_sets(motion: &Motion, reps: &[Representation]) -> Result<(), String> {
+    for (i, step) in motion.steps.iter().enumerate() {
+        let Step::Set { id, opacity, .. } = step else {
+            continue;
+        };
+        let n = i + 1;
+        let matching: Vec<&Representation> = reps.iter().filter(|r| &r.id == id).collect();
+        if matching.is_empty() {
+            return Err(format!("step {n}: no representation with id {id:?}"));
+        }
+        if opacity.is_some() && matching.iter().any(|r| !uses_opacity(r.kind)) {
+            return Err(format!(
+                "step {n}: representation {id:?} does not use opacity (only Surface and Interaction do)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 1 つの表現に `set` を適用する。`p` は手順の進み具合（0 から 1。すぐに変える手順は 1）。
+/// `fading` は、秒数のある手順か。フェードは不透明度の効く種類だけで、ほかの種類は手順の頭で切り替える。
+fn apply_set(
+    rep: &mut Representation,
+    visible: Option<bool>,
+    opacity: Option<f32>,
+    fading: bool,
+    p: f32,
+) {
+    let (from_visible, from_opacity) = (rep.visible, rep.opacity);
+    let to_visible = visible.unwrap_or(from_visible);
+    let to_opacity = opacity.unwrap_or(from_opacity);
+    if !uses_opacity(rep.kind) || !fading {
+        rep.visible = to_visible;
+        if uses_opacity(rep.kind) {
+            rep.opacity = to_opacity;
+        }
+        return;
+    }
+    let lerp = |a: f32, b: f32| a + (b - a) * p;
+    match (from_visible, to_visible) {
+        // 現れる: 見える状態で、0 から目標の不透明度へ
+        (false, true) => {
+            rep.visible = true;
+            rep.opacity = lerp(0.0, to_opacity);
+        }
+        // 消える: 0 へ。終わったら隠し、不透明度はもとの値に戻しておく（あとで現すときのため）
+        (true, false) => {
+            if p >= 1.0 {
+                rep.visible = false;
+                rep.opacity = opacity.unwrap_or(from_opacity);
+            } else {
+                rep.opacity = lerp(from_opacity, 0.0);
+            }
+        }
+        (true, true) => rep.opacity = lerp(from_opacity, to_opacity),
+        // 見えないまま: 見た目は変わらないので、不透明度だけ値を移す
+        (false, false) => rep.opacity = to_opacity,
+    }
+}
+
+/// 時刻 `time_s` の表現のようす。`base` は動きを始める前のワークスペースの表現。`set` の手順を
+/// 順に適用して返す（手順がまだ始まっていなければ、`base` のまま）。
+pub fn representations_at(
+    base: &[Representation],
+    motion: &Motion,
+    time_s: f32,
+) -> Vec<Representation> {
+    let mut reps = base.to_vec();
+    let t = time_s.max(0.0);
+    let mut start = 0.0_f32;
+    for step in &motion.steps {
+        let len = step.seconds();
+        if t < start {
+            break;
+        }
+        if let Step::Set {
+            id,
+            visible,
+            opacity,
+            seconds,
+        } = step
+        {
+            let p = if t >= start + len {
+                1.0
+            } else {
+                ((t - start) / len).clamp(0.0, 1.0)
+            };
+            for rep in reps.iter_mut().filter(|r| &r.id == id) {
+                apply_set(rep, *visible, *opacity, seconds.is_some(), p);
+            }
+        }
+        start += len;
+    }
+    reps
+}
+
+/// `k` 枚目（0 始まり）のフレームの表現。時刻は `k / fps` 秒。
+pub fn representations_for_frame(
+    base: &[Representation],
+    motion: &Motion,
+    k: usize,
+) -> Vec<Representation> {
+    representations_at(base, motion, k as f32 / motion.fps as f32)
 }
 
 #[cfg(test)]
@@ -543,5 +714,125 @@ steps:
             camera_for_frame(&base(), &m, 10),
             camera_at(&base(), &m, 1.0)
         );
+    }
+
+    fn rep(id: &str, kind: RepresentationKind, visible: bool, opacity: f32) -> Representation {
+        Representation::new(
+            id,
+            yui_core::selector::Selector::All,
+            kind,
+            yui_core::representation::ColorScheme::Chain,
+        )
+        .with_visible(visible)
+        .with_opacity(opacity)
+    }
+
+    fn motion_of(steps: &str) -> Motion {
+        parse_motion(&format!("schema: yui-motion/1\nfps: 10\nsteps:\n{steps}")).expect("valid")
+    }
+
+    #[test]
+    fn set_steps_are_checked_when_the_file_is_read() {
+        let bad = |steps: &str| {
+            parse_motion(&format!("schema: yui-motion/1\nfps: 10\nsteps:\n{steps}"))
+                .expect_err("should be refused")
+        };
+        assert!(bad("  - set: {id: a}").contains("visible or opacity"));
+        assert!(bad("  - set: {id: a, opacity: 1.5}").contains("between 0 and 1"));
+        assert!(bad("  - set: {id: a, opacity: -0.1}").contains("between 0 and 1"));
+        assert!(bad("  - set: {id: '', visible: true}").contains("id"));
+        assert!(bad("  - set: {id: a, visible: true, seconds: 0}").contains("seconds"));
+        assert!(bad("  - set: {visible: true}").contains("id"));
+        // 秒数がなくてもよい。長さは 0
+        let m = motion_of("  - set: {id: a, visible: true}\n  - wait: 1");
+        assert_eq!(m.total_seconds(), 1.0);
+        assert!(m.uses_set());
+    }
+
+    #[test]
+    fn set_must_name_an_existing_representation_that_can_take_the_change() {
+        let reps = vec![
+            rep("cart", RepresentationKind::Cartoon, true, 1.0),
+            rep("surf", RepresentationKind::Surface, true, 0.8),
+        ];
+        let ok = motion_of(
+            "  - set: {id: surf, opacity: 0.2, seconds: 1}\n  - set: {id: cart, visible: false}",
+        );
+        assert!(check_sets(&ok, &reps).is_ok());
+        let missing = motion_of("  - set: {id: nope, visible: false}");
+        let e = check_sets(&missing, &reps).unwrap_err();
+        assert!(e.contains("step 1") && e.contains("nope"), "{e}");
+        let unsuitable = motion_of("  - wait: 1\n  - set: {id: cart, opacity: 0.5}");
+        let e = check_sets(&unsuitable, &reps).unwrap_err();
+        assert!(
+            e.contains("step 2") && e.contains("does not use opacity"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn an_immediate_set_applies_at_its_time_and_the_base_is_untouched() {
+        let base = vec![
+            rep("cart", RepresentationKind::Cartoon, true, 1.0),
+            rep("surf", RepresentationKind::Surface, true, 0.8),
+        ];
+        let m = motion_of(
+            "  - wait: 1\n  - set: {id: cart, visible: false}\n  - set: {id: surf, opacity: 0.3}\n  - wait: 1",
+        );
+        let before = representations_at(&base, &m, 0.9);
+        assert_eq!(before, base);
+        let after = representations_at(&base, &m, 1.0);
+        assert!(!after[0].visible);
+        assert_eq!(after[1].opacity, 0.3);
+        assert!(base[0].visible && base[1].opacity == 0.8);
+        // 動きが終わったあとも、そのまま
+        assert_eq!(representations_at(&base, &m, 99.0), after);
+    }
+
+    #[test]
+    fn a_fade_changes_the_opacity_evenly() {
+        let base = vec![rep("surf", RepresentationKind::Surface, true, 0.8)];
+        let m = motion_of("  - set: {id: surf, opacity: 0.2, seconds: 2}");
+        let at = |t: f32| representations_at(&base, &m, t)[0].opacity;
+        assert!((at(0.0) - 0.8).abs() < 1e-6);
+        assert!((at(1.0) - 0.5).abs() < 1e-6);
+        assert!((at(2.0) - 0.2).abs() < 1e-6);
+        assert!((at(5.0) - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fading_in_and_out_changes_visibility_at_the_right_moments() {
+        // 隠れていた表現が現れる: 見える状態で 0 から目標へ
+        let hidden = vec![rep("surf", RepresentationKind::Surface, false, 0.6)];
+        let m = motion_of("  - set: {id: surf, visible: true, seconds: 2}");
+        let r = &representations_at(&hidden, &m, 1.0)[0];
+        assert!(r.visible && (r.opacity - 0.3).abs() < 1e-6);
+        let r = &representations_at(&hidden, &m, 2.0)[0];
+        assert!(r.visible && (r.opacity - 0.6).abs() < 1e-6);
+
+        // 見えていた表現が消える: 終わるまで見え、終わったら隠れて、不透明度はもとの値
+        let shown = vec![rep("surf", RepresentationKind::Surface, true, 0.6)];
+        let m = motion_of("  - set: {id: surf, visible: false, seconds: 2}");
+        let r = &representations_at(&shown, &m, 1.0)[0];
+        assert!(r.visible && (r.opacity - 0.3).abs() < 1e-6);
+        let r = &representations_at(&shown, &m, 2.0)[0];
+        assert!(!r.visible && (r.opacity - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_kind_without_opacity_switches_at_the_start_of_the_step() {
+        let base = vec![rep("cart", RepresentationKind::Cartoon, false, 1.0)];
+        let m = motion_of("  - set: {id: cart, visible: true, seconds: 2}");
+        let r = &representations_at(&base, &m, 0.0)[0];
+        assert!(r.visible, "no fade: it appears at once");
+        assert_eq!(r.opacity, 1.0);
+    }
+
+    #[test]
+    fn set_does_not_move_the_camera_or_the_frames() {
+        let m = motion_of("  - set: {id: a, visible: true, seconds: 1}");
+        assert_eq!(frame_at(&m, 0.5), None);
+        let base = CameraState::default();
+        assert_eq!(camera_at(&base, &m, 0.5), base);
     }
 }
