@@ -1,4 +1,4 @@
-//! Reader for the plot data written by `ProteinDF_pytools` (YAML, or the JSON of `pdf-plot-pop.py --json`; UI-free).
+//! Reader for the plot data written by `ProteinDF_pytools` (YAML, e.g. `pdf-plot-pop.py --yaml`; UI-free).
 //!
 //! The format is `pdf-plot/1`. Every point names the ProteinDF atom it belongs to (1-based, in the
 //! order of the ProteinDF input), and the file lists those atoms. This module only turns the file
@@ -15,7 +15,7 @@ use crate::plot::{Axis, PlotData, PlotKey, Point, Series};
 /// The only schema this reader understands.
 pub const SCHEMA: &str = "pdf-plot/1";
 
-/// One atom of the calculation, as listed in the JSON.
+/// One atom of the calculation, as listed in the file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PytoolsAtom {
     /// 1-based index in the ProteinDF input order (the key of the points).
@@ -24,7 +24,7 @@ pub struct PytoolsAtom {
     pub label: String,
 }
 
-/// A plot read from a pytools JSON file.
+/// A plot read from a pytools YAML file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PytoolsPlot {
     pub title: String,
@@ -36,7 +36,7 @@ pub struct PytoolsPlot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PytoolsPlotError {
-    /// Not valid JSON, or a required field is missing or has the wrong type.
+    /// Not valid YAML, or a required field is missing or has the wrong type.
     Malformed(String),
     /// `schema` is not [`SCHEMA`].
     UnsupportedSchema(String),
@@ -115,7 +115,10 @@ struct RawPoint {
     atom: u32,
 }
 
-/// Parse a pytools plot, written as YAML or as JSON (JSON is read by the YAML reader).
+/// Parse a pytools plot written as YAML. (JSON text is YAML too, so the reader does not reject it, but
+/// the file chooser no longer offers `.json` and the format is documented as YAML only.)
+///
+/// `.nan` and `.inf` are read as non-finite numbers; the plot drops those points and counts them.
 ///
 /// Unknown fields are ignored. The schema is checked first, so a file of another version is
 /// reported as such instead of as a missing field.
@@ -365,5 +368,21 @@ series:
         assert_eq!(plot.plot.point_count(), 0);
         assert_eq!(plot.plot.y_axis.label, "y");
         assert_eq!(plot.title, "");
+    }
+
+    #[test]
+    fn yaml_nan_and_inf_points_are_dropped_and_counted() {
+        let yaml = SAMPLE_YAML
+            .replace("y: 0.1, atom: 3", "y: .nan, atom: 3")
+            .replace("x: 1, y:", "x: .inf, y:");
+        let plot = parse_pytools_plot(&yaml).expect("non-finite numbers are not an error");
+        let series = &plot.plot.series[0];
+        assert_eq!(
+            series.points.len(),
+            1,
+            "the points with .inf and .nan are dropped"
+        );
+        assert_eq!(series.skipped, 2);
+        assert!(plot.atoms.len() == 3, "the atoms are kept");
     }
 }
