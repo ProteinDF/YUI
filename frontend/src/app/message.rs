@@ -240,6 +240,10 @@ pub enum Message {
     CameraAction(crate::camera_anim::CameraAction),
     /// カメラのアニメーションのタイマー（時刻は、受け取った側で `Instant::now()` を読む）
     CameraAnimTick,
+    /// View → Camera → "Play Motion...": 動きのファイルを選ぶ
+    PlayMotion,
+    /// 選んだ動きのファイル（名前と本文）。選ぶのを取り消したときは `Ok(None)`
+    PlayMotionOpened(Result<Option<(String, String)>, String>),
     /// 再生の操作（操作のバー、メニュー、キーボード）
     PlaybackControl(crate::playback::PlaybackAction),
     /// 再生中のタイマー（時刻は、受け取った側で `Instant::now()` を読む。WASM のタイマーは、別の型の時刻を返すため）

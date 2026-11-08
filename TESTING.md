@@ -392,6 +392,10 @@ If you encounter an unexpected crash, panic, or rendering glitch:
   - **Action:** View → "Split Editor Right". Rotate the right viewport a little, then View → "Spin". Then turn on "Link Viewport Cameras" and Spin again.
   - **Expected result:** Spin acts on the viewport moved last. With the link on, both viewports show the same rotating view; dragging in either stops both.
 
+- [ ] **Play Motion:**
+  - **Action:** Open `examples/structures/1ubq.pdb`. Click View → Camera → "Play Motion..." and choose `examples/motions/turn-around.yaml`. While it plays, drag with the left button. Play it again and let it end. Then choose a motion file that has a `show_frame` step.
+  - **Expected result:** The molecule turns once about the vertical axis in 6 s, waits, comes closer and tips forward, as the file says; the status bar shows `Playing turn-around.yaml (12.0 s)`. Dragging stops it and the view continues from where it is. When it ends, the view stays at the last camera. A file with `show_frame` or `set` steps is refused with a message and nothing moves.
+
 ### 5.20 Trajectory playback (multi-frame XYZ)
 
 - [ ] **Open and play a trajectory:**

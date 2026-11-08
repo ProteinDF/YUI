@@ -27,7 +27,7 @@ Steps run one after another, so a frame step and a camera step do not move at th
 
 A `set` step only changes representations that already exist in the workspace; it never creates one. For example, if the workspace has a surface representation with the id `surface_1`, this fades it in after a turn: `- turn: {axis: y, angle: 360, seconds: 6}` then `- set: {id: surface_1, visible: true, opacity: 0.6, seconds: 2}`.
 
-Not yet: playing a motion on the screen.
+To watch a motion on the screen first, use View → Camera → "Play Motion...". It plays the camera steps once; a file with `show_frame` or `set` steps is refused there (Export Animation plays them).
 
 ## Files
 
