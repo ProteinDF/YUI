@@ -147,6 +147,12 @@ pub enum AnimKind {
         elapsed: f32,
         duration: f32,
     },
+    /// 動きのファイル（`crate::motion`）を、始めたときの視点（`base`）から、一度だけ再生する
+    Motion {
+        motion: std::sync::Arc<crate::motion::Motion>,
+        base: CameraState,
+        elapsed: f32,
+    },
 }
 
 /// 1 つの分子図のカメラのアニメーション
@@ -180,6 +186,17 @@ impl CameraAnimation {
         }
     }
 
+    /// 動きのファイルを、今の視点から再生し始める
+    pub fn motion(base: CameraState, motion: std::sync::Arc<crate::motion::Motion>) -> Self {
+        Self {
+            kind: AnimKind::Motion {
+                motion,
+                base,
+                elapsed: 0.0,
+            },
+        }
+    }
+
     pub fn is_spin(&self) -> bool {
         matches!(self.kind, AnimKind::Spin { .. })
     }
@@ -188,12 +205,13 @@ impl CameraAnimation {
         matches!(self.kind, AnimKind::Rock { .. })
     }
 
-    /// 視点を使い続ける動き（回転と首振り）か。移動は、決まった視点へ行って終わる。
+    /// 視点を連動先の分子図にも同じに入れる動き（回転、首振り、動きのファイル）か。
+    /// 移動は、構造に合わせる視点へ行って終わるので、縦横比が違う分子図ごとに行う。
     pub fn is_continuous(&self) -> bool {
         !matches!(self.kind, AnimKind::Move { .. })
     }
 
-    /// `dt` 秒だけ進めた視点と、終わったか（移動だけが終わる）を返す。
+    /// `dt` 秒だけ進めた視点と、終わったか（移動と動きのファイルが終わる）を返す。
     /// 回転は今の視点（`current`）から続けるので、外から視点が変わっても、そこから回る。
     pub fn advance(&mut self, current: &CameraState, dt: f32) -> (CameraState, bool) {
         let dt = dt.clamp(0.0, MAX_STEP_S);
@@ -226,6 +244,15 @@ impl CameraAnimation {
                     interpolate_camera(from, to, smoothstep(t)),
                     t >= 1.0 || from == to,
                 )
+            }
+            AnimKind::Motion {
+                motion,
+                base,
+                elapsed,
+            } => {
+                *elapsed += dt;
+                let cam = crate::motion::camera_at(base, motion, *elapsed);
+                (cam, *elapsed >= motion.total_seconds())
             }
         }
     }
@@ -480,5 +507,39 @@ mod tests {
         assert!(CameraAnimation::rock(c.clone()).is_rock());
         assert!(CameraAnimation::rock(c.clone()).is_continuous());
         assert!(!CameraAnimation::move_between(c.clone(), c).is_continuous());
+    }
+
+    #[test]
+    fn a_motion_plays_once_and_stays_at_its_last_camera() {
+        let motion = std::sync::Arc::new(
+            crate::motion::parse_motion(
+                "schema: yui-motion/1\nfps: 10\nsteps:\n  - turn: {axis: y, angle: 90, seconds: 1}\n  - wait: 0.5",
+            )
+            .expect("valid"),
+        );
+        let base = cam([0.0, 0.0, 50.0], [0.0, 0.0, 0.0]);
+        let mut anim = CameraAnimation::motion(base.clone(), motion.clone());
+        assert!(matches!(anim.kind, AnimKind::Motion { .. }) && anim.is_continuous());
+        // 0.05 秒ずつ 1 秒。まだ終わらない
+        let mut last = base.clone();
+        for _ in 0..20 {
+            let (c, finished) = anim.advance(&last, 0.05);
+            assert!(!finished);
+            last = c;
+        }
+        // 半分（0.5 秒）の手前は、カメラが動いている
+        assert_ne!(last, base);
+        // 残りの 0.5 秒（待ち）で終わり、視点は、1 秒の時点（90 度回したところ）のまま
+        let mut finished = false;
+        for _ in 0..11 {
+            let (c, f) = anim.advance(&last, 0.05);
+            last = c;
+            finished = f;
+        }
+        assert!(finished);
+        let expected = crate::motion::camera_at(&base, &motion, 1.55);
+        assert_eq!(last, expected);
+        // 軸まわり 90 度: 視点が x 軸の側へ回っている
+        assert!((last.eye[0].abs() - 50.0).abs() < 0.01 && last.eye[2].abs() < 0.01);
     }
 }

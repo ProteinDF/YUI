@@ -107,6 +107,7 @@ fn menu(action: MenuAction) -> impl Fn() -> Message {
 /// | `playback.play_pause` `playback.first` `playback.prev` `playback.next` `playback.last` | なし | `Message::PlaybackControl(PlaybackAction::*)` |
 /// | `playback.set_loop` | `mode: "once" \| "repeat" \| "ping_pong"` | `Message::PlaybackControl(PlaybackAction::SetLoopMode)` |
 /// | `camera.toggle_spin` `camera.toggle_rock` `camera.cycle_spin_speed` `camera.zoom_to_selection` | なし | `Message::CameraAction(CameraAction::*)` |
+/// | `camera.play_motion` | なし | `Message::PlayMotion`（動きのファイルを選んで再生する） |
 /// | `selection.clear` `selection.save_as_named` | なし | `Message::ClearSelection` / `Message::SaveSelectionAsNamed` |
 /// | `view.toggle_pane` | `pane: PaneKind` | `MenuAction::ViewTogglePane` |
 /// | `view.open_plot` | `kind: "atom_positions"` | `MenuAction::ViewOpenPlot` |
@@ -197,6 +198,7 @@ pub fn register_menu_commands(reg: &mut CommandRegistry) {
         camera("camera.cycle_spin_speed", C::CycleSpinSpeed);
         camera("camera.zoom_to_selection", C::ZoomToSelection);
     }
+    reg.register_plain("camera.play_motion", || Message::PlayMotion);
     reg.register("playback.set_loop", |args| {
         let a: LoopArgs = parse_args(args)?;
         let mode = crate::playback::LoopMode::parse(&a.mode)
@@ -657,6 +659,11 @@ fn register_view_menu(menus: &mut MenuRegistry) {
             MenuItem::Command(CommandItem::new(
                 format!("Spin Speed: {} deg/s", ctx.spin_speed),
                 CommandInvocation::plain("camera.cycle_spin_speed"),
+                ItemStyle::DROPDOWN,
+            )),
+            MenuItem::Command(CommandItem::new(
+                "Play Motion...",
+                CommandInvocation::plain("camera.play_motion"),
                 ItemStyle::DROPDOWN,
             )),
         ]
@@ -1218,6 +1225,7 @@ mod tests {
                 "  Spin",
                 "  Rock",
                 "Spin Speed: 0 deg/s",
+                "Play Motion...",
                 "---",
                 "✓ Explorer / Playbook (Left)",
                 "  Inspector (Right)",
@@ -1394,6 +1402,7 @@ mod tests {
                 "Spin Speed: 0 deg/s",
                 "CameraAction(CycleSpinSpeed)".to_string(),
             ),
+            ("Play Motion...", "PlayMotion".to_string()),
             ("Explorer / Playbook (Left)", m("ViewTogglePane(Left)")),
             ("Inspector (Right)", m("ViewTogglePane(Right)")),
             (

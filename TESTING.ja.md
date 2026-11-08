@@ -392,6 +392,10 @@ GUIの「Python Console」タブはまだ実装されていません。現時点
   - **操作:** View →「Split Editor Right」を押す。右の分子図を少し回してから、View →「Spin」を押す。次に「Link Viewport Cameras」をオンにして、もう一度 Spin を押す。
   - **期待される結果:** Spin は、最後に動かした分子図に効く。連動をオンにすると、両方の分子図が同じ回る視点になり、どちらでドラッグしても、両方が止まる。
 
+- [ ] **Play Motion:**
+  - **操作:** `examples/structures/1ubq.pdb` を開く。View → Camera →「Play Motion...」を選び、`examples/motions/turn-around.yaml` を選ぶ。再生中に、左ボタンでドラッグする。もう一度再生して、終わるまで待つ。次に、`show_frame` の手順があるファイルを選ぶ。
+  - **期待される結果:** 分子が、ファイルのとおり、縦軸まわりに 6 秒で 1 周し、少し待ち、近づいて、前に傾く。ステータスバーに `Playing turn-around.yaml (12.0 s)` と出る。ドラッグすると止まり、そこから視点が続く。終わると、最後のカメラのままになる。`show_frame` や `set` の手順があるファイルは、メッセージを出して断り、何も動かない。
+
 ### 5.20 軌跡の再生（複数フレームの XYZ）
 
 - [ ] **軌跡を開いて再生する:**

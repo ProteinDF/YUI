@@ -436,6 +436,15 @@ impl Yui {
             Message::CameraAction(action) => {
                 self.handle_camera_action(action);
             }
+            Message::PlayMotion => {
+                task = Task::perform(
+                    crate::movie_export::open_motion_dialog(),
+                    Message::PlayMotionOpened,
+                );
+            }
+            Message::PlayMotionOpened(result) => {
+                self.handle_play_motion_opened(result);
+            }
             Message::CameraAnimTick => {
                 self.handle_camera_anim_tick(iced::time::Instant::now());
             }

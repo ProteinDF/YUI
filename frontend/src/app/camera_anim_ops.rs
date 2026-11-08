@@ -98,6 +98,51 @@ impl Yui {
         }
     }
 
+    /// 選んだ動きのファイルを読み、検査して、今の視点から再生を始める。
+    /// 誤りは、ステータスバーに最初の 1 件を出す。`show_frame` と `set` は、画面ではまだ再生できない
+    /// ので、始める前に断る（書き出しでは使える）。
+    pub(super) fn handle_play_motion_opened(
+        &mut self,
+        result: Result<Option<(String, String)>, String>,
+    ) {
+        let (name, text) = match result {
+            Ok(Some(v)) => v,
+            Ok(None) => return,
+            Err(e) => {
+                self.status_message =
+                    Some(StatusMessage::error(format!("Play Motion failed: {e}")));
+                return;
+            }
+        };
+        let motion = match crate::motion::parse_motion(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                self.status_message = Some(StatusMessage::error(format!(
+                    "Play Motion failed: {name}: {e}"
+                )));
+                return;
+            }
+        };
+        if motion.uses_frames() || motion.uses_set() {
+            self.status_message = Some(StatusMessage::error(
+                "Play Motion failed: show_frame and set steps cannot be played on the screen yet \
+                 (they work in Export Animation)."
+                    .to_string(),
+            ));
+            return;
+        }
+        let id = self.animation_target();
+        let base = self.camera_of(id).clone();
+        let seconds = motion.total_seconds();
+        self.start_camera_animation(
+            id,
+            CameraAnimation::motion(base, std::sync::Arc::new(motion)),
+        );
+        self.status_message = Some(StatusMessage::info(format!(
+            "Playing {name} ({seconds:.1} s)"
+        )));
+    }
+
     /// 選ばれている原子に合わせる。合わせる視点は分子図が（縦横比を使って）求め、結果が届いたら、滑らかに動く。
     fn zoom_to_selection(&mut self) {
         if self.selection.is_empty() {
@@ -222,6 +267,112 @@ mod tests {
         let turned = (azimuth(&app.state.camera) - before).abs();
         // 既定 20 度/秒 × 2 秒
         assert!((turned - 40.0).abs() < 0.5, "turned {turned}");
+    }
+
+    /// 2 つの方位角（度）の差の大きさ（0 から 180）
+    fn angle_between(a: f32, b: f32) -> f32 {
+        let d = (a - b).rem_euclid(360.0);
+        d.min(360.0 - d)
+    }
+
+    const TURN_MOTION: &str = "schema: yui-motion/1\nfps: 10\nsteps:\n  - turn: {axis: y, angle: 90, seconds: 2}\n  - wait: 1";
+
+    fn play(app: &mut Yui, text: &str) {
+        let _ = app.update(Message::PlayMotionOpened(Ok(Some((
+            "m.yaml".to_string(),
+            text.to_string(),
+        )))));
+    }
+
+    fn status(app: &Yui) -> String {
+        app.status_message
+            .as_ref()
+            .map(|m| m.text.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_play_motion_turns_the_camera_and_stops_at_the_end() {
+        let mut app = Yui::default();
+        app.state.camera = cam(0.0);
+        let start = app.state.camera.clone();
+        play(&mut app, TURN_MOTION);
+        assert!(app.camera_anims.contains_key(&ViewportId::Primary));
+        assert!(status(&app).contains("Playing m.yaml"), "{}", status(&app));
+        // 1 秒のところ: 90 度の半分（45 度）回っている
+        run(&mut app, Instant::now(), 1.0);
+        let half = angle_between(azimuth(&app.state.camera), azimuth(&start));
+        assert!((half - 45.0).abs() < 0.5, "turned {half}");
+        // 3 秒（回し終えて、待ちも終わる）で終わり、視点は 90 度回したまま
+        run(&mut app, Instant::now(), 2.5);
+        assert!(app.camera_anims.is_empty(), "the motion has ended");
+        let turned = angle_between(azimuth(&app.state.camera), azimuth(&start));
+        assert!((turned - 90.0).abs() < 0.5, "turned {turned}");
+    }
+
+    #[test]
+    fn test_a_mouse_operation_stops_the_motion() {
+        let mut app = Yui::default();
+        app.state.camera = cam(0.0);
+        play(&mut app, TURN_MOTION);
+        run(&mut app, Instant::now(), 0.5);
+        mouse_moved(&mut app, ViewportId::Primary, cam(5.0));
+        assert!(app.camera_anims.is_empty());
+    }
+
+    #[test]
+    fn test_spin_replaces_a_playing_motion_and_the_menu_item_exists() {
+        let mut app = Yui::default();
+        play(&mut app, TURN_MOTION);
+        act(&mut app, CameraAction::ToggleSpin);
+        assert!(app.is_spinning());
+        // 動きを再生すると、回転は置き換わる
+        play(&mut app, TURN_MOTION);
+        assert!(!app.is_spinning());
+        assert!(app.camera_anims.contains_key(&ViewportId::Primary));
+    }
+
+    #[test]
+    fn test_play_motion_refuses_bad_files_and_steps_it_cannot_play() {
+        let mut app = Yui::default();
+        play(
+            &mut app,
+            "schema: yui-motion/1\nfps: 10\nsteps: [{wait: 0}]",
+        );
+        assert!(app.camera_anims.is_empty());
+        assert!(status(&app).contains("step 1"), "{}", status(&app));
+        for step in [
+            "{show_frame: {from: 1, to: 2, seconds: 1}}",
+            "{set: {id: a, visible: false}}",
+        ] {
+            play(
+                &mut app,
+                &format!("schema: yui-motion/1\nfps: 10\nsteps: [{step}]"),
+            );
+            assert!(app.camera_anims.is_empty(), "{step}");
+            assert!(
+                status(&app).contains("cannot be played on the screen yet"),
+                "{}",
+                status(&app)
+            );
+        }
+        // 選ぶのを取り消しても、読めなかったときも、何も始まらない
+        let _ = app.update(Message::PlayMotionOpened(Ok(None)));
+        let _ = app.update(Message::PlayMotionOpened(Err("not UTF-8".to_string())));
+        assert!(app.camera_anims.is_empty());
+        assert!(status(&app).contains("not UTF-8"));
+    }
+
+    #[test]
+    fn test_play_motion_mirrors_to_the_linked_viewport() {
+        let mut app = Yui::default();
+        split(&mut app);
+        let _ = app.update(Message::MenuAction(MenuAction::ViewToggleCameraLink));
+        assert!(app.camera_link);
+        app.state.camera = cam(0.0);
+        play(&mut app, TURN_MOTION);
+        run(&mut app, Instant::now(), 1.0);
+        assert_eq!(app.secondary_camera, Some(app.state.camera.clone()));
     }
 
     #[test]
