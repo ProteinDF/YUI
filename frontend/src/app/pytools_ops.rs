@@ -1,6 +1,6 @@
-//! pytools のグラフ（`pdf-plot/1` の JSON）を開いて、下のパネルのタブに出す（ROADMAP 6l-ii）。
+//! pytools のグラフ（`pdf-plot/1` の YAML）を開いて、下のパネルのタブに出す（ROADMAP 6l-ii）。
 //!
-//! JSON は `core` で `PlotData` にする。原子の対応（`AtomMap`）は、表示中の構造の原子の数と元素が合うときだけ作る。
+//! YAML は `core` で `PlotData` にする。原子の対応（`AtomMap`）は、表示中の構造の原子の数と元素が合うときだけ作る。
 //! 合わなければ、理由をプロットの下に出す。対応が作れたときだけ、点のクリックで原子を選び、
 //! 3D で選んだ原子を点の強調にする（選択は 3D と共通の `Yui.selection`）。
 
@@ -27,8 +27,7 @@ pub(crate) struct PytoolsMapCache {
 /// File → Open Plot (pytools)... のダイアログ。ファイル名と中身の文字列を返す（キャンセルは `None`）。
 pub async fn open_plot_dialog() -> Result<Option<(String, String)>, String> {
     let Some(handle) = rfd::AsyncFileDialog::new()
-        // "json" is read only until ProteinDF_pytools writes YAML (a transitional measure).
-        .add_filter("pytools plot", &["yaml", "yml", "json"])
+        .add_filter("pytools plot", &["yaml", "yml"])
         .pick_file()
         .await
     else {
